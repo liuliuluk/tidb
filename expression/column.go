@@ -17,16 +17,15 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/parser/model"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
 )
 
 // CorrelatedColumn stands for a column in a correlated sub query.
@@ -53,7 +52,7 @@ func (col *CorrelatedColumn) EvalInt(ctx sessionctx.Context, row chunk.Row) (int
 	}
 	if col.GetType().Hybrid() {
 		res, err := col.Data.ToInt64(ctx.GetSessionVars().StmtCtx)
-		return res, err != nil, errors.Trace(err)
+		return res, err != nil, err
 	}
 	return col.Data.GetInt64(), false, nil
 }
@@ -76,7 +75,7 @@ func (col *CorrelatedColumn) EvalString(ctx sessionctx.Context, row chunk.Row) (
 	if resLen < col.RetType.Flen && ctx.GetSessionVars().StmtCtx.PadCharToFullLength {
 		res = res + strings.Repeat(" ", col.RetType.Flen-resLen)
 	}
-	return res, err != nil, errors.Trace(err)
+	return res, err != nil, err
 }
 
 // EvalDecimal returns decimal representation of CorrelatedColumn.
@@ -124,6 +123,11 @@ func (col *CorrelatedColumn) IsCorrelated() bool {
 	return true
 }
 
+// ConstItem implements Expression interface.
+func (col *CorrelatedColumn) ConstItem() bool {
+	return true
+}
+
 // Decorrelate implements Expression interface.
 func (col *CorrelatedColumn) Decorrelate(schema *Schema) Expression {
 	if !schema.Contains(&col.Column) {
@@ -133,11 +137,12 @@ func (col *CorrelatedColumn) Decorrelate(schema *Schema) Expression {
 }
 
 // ResolveIndices implements Expression interface.
-func (col *CorrelatedColumn) ResolveIndices(_ *Schema) Expression {
-	return col
+func (col *CorrelatedColumn) ResolveIndices(_ *Schema) (Expression, error) {
+	return col, nil
 }
 
-func (col *CorrelatedColumn) resolveIndices(_ *Schema) {
+func (col *CorrelatedColumn) resolveIndices(_ *Schema) error {
+	return nil
 }
 
 // Column represents a column.
@@ -148,19 +153,24 @@ type Column struct {
 	OrigTblName model.CIStr
 	TblName     model.CIStr
 	RetType     *types.FieldType
-	// This id is used to specify whether this column is ExtraHandleColumn or to access histogram.
+	// ID is used to specify whether this column is ExtraHandleColumn or to access histogram.
 	// We'll try to remove it in the future.
 	ID int64
 	// UniqueID is the unique id of this column.
 	UniqueID int64
-	// IsAggOrSubq means if this column is referenced to a Aggregation column or a Subquery column.
+	// IsReferenced means if this column is referenced to an Aggregation column, or a Subquery column,
+	// or an argument column of function IfNull.
 	// If so, this column's name will be the plain sql text.
-	IsAggOrSubq bool
+	IsReferenced bool
 
 	// Index is used for execution, to tell the column's position in the given row.
 	Index int
 
 	hashcode []byte
+
+	// InOperand indicates whether this column is the inner operand of column equal condition converted
+	// from `[not] in (subq)`.
+	InOperand bool
 }
 
 // Equal implements Expression interface.
@@ -206,7 +216,7 @@ func (col *Column) EvalInt(ctx sessionctx.Context, row chunk.Row) (int64, bool, 
 			return 0, true, nil
 		}
 		res, err := val.ToInt64(ctx.GetSessionVars().StmtCtx)
-		return res, err != nil, errors.Trace(err)
+		return res, err != nil, err
 	}
 	if row.IsNull(col.Index) {
 		return 0, true, nil
@@ -230,18 +240,14 @@ func (col *Column) EvalString(ctx sessionctx.Context, row chunk.Row) (string, bo
 	if row.IsNull(col.Index) {
 		return "", true, nil
 	}
+
+	// Specially handle the ENUM/SET/BIT input value.
 	if col.GetType().Hybrid() {
 		val := row.GetDatum(col.Index, col.RetType)
-		if val.IsNull() {
-			return "", true, nil
-		}
 		res, err := val.ToString()
-		resLen := len([]rune(res))
-		if ctx.GetSessionVars().StmtCtx.PadCharToFullLength && col.GetType().Tp == mysql.TypeString && resLen < col.RetType.Flen {
-			res = res + strings.Repeat(" ", col.RetType.Flen-resLen)
-		}
-		return res, err != nil, errors.Trace(err)
+		return res, err != nil, err
 	}
+
 	val := row.GetString(col.Index)
 	if ctx.GetSessionVars().StmtCtx.PadCharToFullLength && col.GetType().Tp == mysql.TypeString {
 		valLen := len([]rune(val))
@@ -296,6 +302,11 @@ func (col *Column) IsCorrelated() bool {
 	return false
 }
 
+// ConstItem implements Expression interface.
+func (col *Column) ConstItem() bool {
+	return false
+}
+
 // Decorrelate implements Expression interface.
 func (col *Column) Decorrelate(_ *Schema) Expression {
 	return col
@@ -313,17 +324,18 @@ func (col *Column) HashCode(_ *stmtctx.StatementContext) []byte {
 }
 
 // ResolveIndices implements Expression interface.
-func (col *Column) ResolveIndices(schema *Schema) Expression {
+func (col *Column) ResolveIndices(schema *Schema) (Expression, error) {
 	newCol := col.Clone()
-	newCol.resolveIndices(schema)
-	return newCol
+	err := newCol.resolveIndices(schema)
+	return newCol, err
 }
 
-func (col *Column) resolveIndices(schema *Schema) {
+func (col *Column) resolveIndices(schema *Schema) error {
 	col.Index = schema.ColumnIndex(col)
 	if col.Index == -1 {
-		log.Errorf("Can't find column %s in schema %s", col, schema)
+		return errors.Errorf("Can't find column %s in schema %s", col, schema)
 	}
+	return nil
 }
 
 // Column2Exprs will transfer column slice to expression slice.

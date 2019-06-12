@@ -15,11 +15,11 @@ package server
 
 import (
 	. "github.com/pingcap/check"
-	"github.com/pingcap/tidb/ast"
-	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/parser/ast"
+	"github.com/pingcap/parser/charset"
+	"github.com/pingcap/parser/model"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/charset"
 )
 
 type tidbResultSetTestSuite struct{}
@@ -34,7 +34,7 @@ func createColumnByTypeAndLen(tp byte, len uint32) *ColumnInfo {
 		Name:               "a",
 		OrgName:            "a",
 		ColumnLength:       len,
-		Charset:            uint16(mysql.CharsetIDs[charset.CharsetUTF8]),
+		Charset:            uint16(mysql.CharsetNameToID(charset.CharsetUTF8)),
 		Flag:               uint16(mysql.UnsignedFlag),
 		Decimal:            uint8(0),
 		Type:               tp,

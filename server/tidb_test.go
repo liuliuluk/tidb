@@ -15,6 +15,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -28,15 +29,14 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	. "github.com/pingcap/check"
+	"github.com/pingcap/errors"
+	tmysql "github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
-	tmysql "github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/store/mockstore"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 type TidbTestSuite struct {
@@ -160,9 +160,11 @@ func (ts *TidbTestSuite) TestMultiStatements(c *C) {
 	runTestMultiStatements(c)
 }
 
-func (ts *TidbTestSuite) TestSocket(c *C) {
+func (ts *TidbTestSuite) TestSocketForwarding(c *C) {
 	cfg := config.NewConfig()
 	cfg.Socket = "/tmp/tidbtest.sock"
+	cfg.Port = 3999
+	os.Remove(cfg.Socket)
 	cfg.Status.ReportStatus = false
 
 	server, err := NewServer(cfg, ts.tidbdrv)
@@ -180,11 +182,35 @@ func (ts *TidbTestSuite) TestSocket(c *C) {
 	}, "SocketRegression")
 }
 
+func (ts *TidbTestSuite) TestSocket(c *C) {
+	cfg := config.NewConfig()
+	cfg.Socket = "/tmp/tidbtest.sock"
+	cfg.Port = 0
+	os.Remove(cfg.Socket)
+	cfg.Host = ""
+	cfg.Status.ReportStatus = false
+
+	server, err := NewServer(cfg, ts.tidbdrv)
+	c.Assert(err, IsNil)
+	go server.Run()
+	time.Sleep(time.Millisecond * 100)
+	defer server.Close()
+
+	runTestRegression(c, func(config *mysql.Config) {
+		config.User = "root"
+		config.Net = "unix"
+		config.Addr = "/tmp/tidbtest.sock"
+		config.DBName = "test"
+		config.Strict = true
+	}, "SocketRegression")
+
+}
+
 // generateCert generates a private key and a certificate in PEM format based on parameters.
 // If parentCert and parentCertKey is specified, the new certificate will be signed by the parentCert.
 // Otherwise, the new certificate will be self-signed and is a CA.
 func generateCert(sn int, commonName string, parentCert *x509.Certificate, parentCertKey *rsa.PrivateKey, outKeyFile string, outCertFile string) (*x509.Certificate, *rsa.PrivateKey, error) {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 512)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 528)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
@@ -335,10 +361,6 @@ func (ts *TidbTestSuite) TestTLS(c *C) {
 	server.Close()
 
 	// Start the server with TLS & CA, if the client presents its certificate, the certificate will be verified.
-	connOverrider = func(config *mysql.Config) {
-		config.TLSConfig = "client-certificate"
-		config.Addr = "localhost:4004"
-	}
 	cfg = config.NewConfig()
 	cfg.Port = 4004
 	cfg.Status.ReportStatus = false
@@ -414,14 +436,15 @@ func (ts *TidbTestSuite) TestCreateTableFlen(c *C) {
 	_, err = qctx.Execute(ctx, testSQL)
 	c.Assert(err, IsNil)
 	rs, err := qctx.Execute(ctx, "show create table t1")
-	chk := rs[0].NewChunk()
-	err = rs[0].Next(ctx, chk)
+	c.Assert(err, IsNil)
+	req := rs[0].NewRecordBatch()
+	err = rs[0].Next(ctx, req)
 	c.Assert(err, IsNil)
 	cols := rs[0].Columns()
 	c.Assert(err, IsNil)
 	c.Assert(len(cols), Equals, 2)
 	c.Assert(int(cols[0].ColumnLength), Equals, 5*tmysql.MaxBytesOfCharacter)
-	c.Assert(int(cols[1].ColumnLength), Equals, len(chk.GetRow(0).GetString(1))*tmysql.MaxBytesOfCharacter)
+	c.Assert(int(cols[1].ColumnLength), Equals, len(req.GetRow(0).GetString(1))*tmysql.MaxBytesOfCharacter)
 
 	// for issue#5246
 	rs, err = qctx.Execute(ctx, "select y, z from t1")
@@ -443,8 +466,9 @@ func (ts *TidbTestSuite) TestShowTablesFlen(c *C) {
 	_, err = qctx.Execute(ctx, testSQL)
 	c.Assert(err, IsNil)
 	rs, err := qctx.Execute(ctx, "show tables")
-	chk := rs[0].NewChunk()
-	err = rs[0].Next(ctx, chk)
+	c.Assert(err, IsNil)
+	req := rs[0].NewRecordBatch()
+	err = rs[0].Next(ctx, req)
 	c.Assert(err, IsNil)
 	cols := rs[0].Columns()
 	c.Assert(err, IsNil)
@@ -511,11 +535,11 @@ func (ts *TidbTestSuite) TestFieldList(c *C) {
 		case 10, 11, 12, 15, 16:
 			// c_char char(20), c_varchar varchar(20), c_text_d text,
 			// c_set set('a', 'b', 'c'), c_enum enum('a', 'b', 'c')
-			c.Assert(col.Charset, Equals, uint16(tmysql.CharsetIDs["utf8"]), Commentf("index %d", i))
+			c.Assert(col.Charset, Equals, uint16(tmysql.CharsetNameToID(tmysql.DefaultCharset)), Commentf("index %d", i))
 			continue
 		}
 
-		c.Assert(col.Charset, Equals, uint16(tmysql.CharsetIDs["binary"]), Commentf("index %d", i))
+		c.Assert(col.Charset, Equals, uint16(tmysql.CharsetNameToID("binary")), Commentf("index %d", i))
 	}
 
 	// c_decimal decimal(6, 3)

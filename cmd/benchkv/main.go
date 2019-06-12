@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -23,14 +24,13 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-
+	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"github.com/pingcap/parser/terror"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/tikv"
-	"github.com/pingcap/tidb/terror"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
+	"go.uber.org/zap"
 )
 
 var (
@@ -101,7 +101,7 @@ func batchRW(value []byte) {
 				k := base*i + j
 				txn, err := store.Begin()
 				if err != nil {
-					log.Fatal(err)
+					log.Fatal(err.Error())
 				}
 				key := fmt.Sprintf("key_%d", k)
 				err = txn.Set([]byte(key), value)
@@ -121,7 +121,7 @@ func batchRW(value []byte) {
 
 func main() {
 	flag.Parse()
-	log.SetLevel(log.ErrorLevel)
+	log.SetLevel(zap.ErrorLevel)
 	Init()
 
 	value := make([]byte, *valueSize)

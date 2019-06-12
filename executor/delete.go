@@ -14,14 +14,15 @@
 package executor
 
 import (
-	"github.com/pingcap/tidb/ast"
+	"context"
+
+	"github.com/opentracing/opentracing-go"
+	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // DeleteExec represents a delete executor.
@@ -39,24 +40,20 @@ type DeleteExec struct {
 	// `delete from t as t1, t as t2`, the same table has two alias, we have to identify a table
 	// by its alias instead of ID.
 	tblMap map[int64][]*ast.TableName
-
-	finished bool
 }
 
 // Next implements the Executor Next interface.
-func (e *DeleteExec) Next(ctx context.Context, chk *chunk.Chunk) error {
-	chk.Reset()
-	if e.finished {
-		return nil
+func (e *DeleteExec) Next(ctx context.Context, req *chunk.RecordBatch) error {
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan("delete.Next", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
 	}
-	defer func() {
-		e.finished = true
-	}()
 
+	req.Reset()
 	if e.IsMultiTable {
-		return errors.Trace(e.deleteMultiTablesByChunk(ctx))
+		return e.deleteMultiTablesByChunk(ctx)
 	}
-	return errors.Trace(e.deleteSingleTableByChunk(ctx))
+	return e.deleteSingleTableByChunk(ctx)
 }
 
 // matchingDeletingTable checks whether this column is from the table which is in the deleting list.
@@ -81,7 +78,7 @@ func (e *DeleteExec) deleteOneRow(tbl table.Table, handleCol *expression.Column,
 	handle := row[handleCol.Index].GetInt64()
 	err := e.removeRow(e.ctx, tbl, handle, row[:end])
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
 
 	return nil
@@ -104,13 +101,13 @@ func (e *DeleteExec) deleteSingleTableByChunk(ctx context.Context) error {
 	batchDelete := e.ctx.GetSessionVars().BatchDelete && !e.ctx.GetSessionVars().InTxn()
 	batchDMLSize := e.ctx.GetSessionVars().DMLBatchSize
 	fields := e.children[0].retTypes()
+	chk := e.children[0].newFirstChunk()
 	for {
-		chk := e.children[0].newChunk()
 		iter := chunk.NewIterator4Chunk(chk)
 
-		err := e.children[0].Next(ctx, chk)
+		err := e.children[0].Next(ctx, chunk.NewRecordBatch(chk))
 		if err != nil {
-			return errors.Trace(err)
+			return err
 		}
 		if chk.NumRows() == 0 {
 			break
@@ -118,8 +115,10 @@ func (e *DeleteExec) deleteSingleTableByChunk(ctx context.Context) error {
 
 		for chunkRow := iter.Begin(); chunkRow != iter.End(); chunkRow = iter.Next() {
 			if batchDelete && rowCount >= batchDMLSize {
-				e.ctx.StmtCommit()
-				if err = e.ctx.NewTxn(); err != nil {
+				if err = e.ctx.StmtCommit(); err != nil {
+					return err
+				}
+				if err = e.ctx.NewTxn(ctx); err != nil {
 					// We should return a special error for batch insert.
 					return ErrBatchInsertFail.GenWithStack("BatchDelete failed with error: %v", err)
 				}
@@ -129,10 +128,11 @@ func (e *DeleteExec) deleteSingleTableByChunk(ctx context.Context) error {
 			datumRow := chunkRow.GetDatumRow(fields)
 			err = e.deleteOneRow(tbl, handleCol, datumRow)
 			if err != nil {
-				return errors.Trace(err)
+				return err
 			}
 			rowCount++
 		}
+		chk = chunk.Renew(chk, e.maxChunkSize)
 	}
 
 	return nil
@@ -184,13 +184,12 @@ func (e *DeleteExec) deleteMultiTablesByChunk(ctx context.Context) error {
 	colPosInfos := e.getColPosInfos(e.children[0].Schema())
 	tblRowMap := make(tableRowMapType)
 	fields := e.children[0].retTypes()
+	chk := e.children[0].newFirstChunk()
 	for {
-		chk := e.children[0].newChunk()
 		iter := chunk.NewIterator4Chunk(chk)
-
-		err := e.children[0].Next(ctx, chk)
+		err := e.children[0].Next(ctx, chunk.NewRecordBatch(chk))
 		if err != nil {
-			return errors.Trace(err)
+			return err
 		}
 		if chk.NumRows() == 0 {
 			break
@@ -200,9 +199,10 @@ func (e *DeleteExec) deleteMultiTablesByChunk(ctx context.Context) error {
 			joinedDatumRow := joinedChunkRow.GetDatumRow(fields)
 			e.composeTblRowMap(tblRowMap, colPosInfos, joinedDatumRow)
 		}
+		chk = chunk.Renew(chk, e.maxChunkSize)
 	}
 
-	return errors.Trace(e.removeRowsInTblRowMap(tblRowMap))
+	return e.removeRowsInTblRowMap(tblRowMap)
 }
 
 func (e *DeleteExec) removeRowsInTblRowMap(tblRowMap tableRowMapType) error {
@@ -210,7 +210,7 @@ func (e *DeleteExec) removeRowsInTblRowMap(tblRowMap tableRowMapType) error {
 		for handle, data := range rowMap {
 			err := e.removeRow(e.ctx, e.tblID2Table[id], handle, data)
 			if err != nil {
-				return errors.Trace(err)
+				return err
 			}
 		}
 	}
@@ -221,17 +221,9 @@ func (e *DeleteExec) removeRowsInTblRowMap(tblRowMap tableRowMapType) error {
 func (e *DeleteExec) removeRow(ctx sessionctx.Context, t table.Table, h int64, data []types.Datum) error {
 	err := t.RemoveRecord(ctx, h, data)
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
 	ctx.GetSessionVars().StmtCtx.AddAffectedRows(1)
-	colSize := make(map[int64]int64)
-	for id, col := range t.Cols() {
-		val := -int64(len(data[id].GetBytes()))
-		if val != 0 {
-			colSize[col.ID] = val
-		}
-	}
-	ctx.GetSessionVars().TxnCtx.UpdateDeltaForTable(t.Meta().ID, -1, 1, colSize)
 	return nil
 }
 

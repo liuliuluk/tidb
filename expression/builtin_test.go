@@ -17,15 +17,14 @@ import (
 	"reflect"
 
 	. "github.com/pingcap/check"
-	"github.com/pingcap/tidb/ast"
-	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/parser/ast"
+	"github.com/pingcap/parser/charset"
+	"github.com/pingcap/parser/model"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/charset"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/testleak"
-	"github.com/pkg/errors"
 )
 
 func evalBuiltinFunc(f builtinFunc, row chunk.Row) (d types.Datum, err error) {
@@ -58,7 +57,7 @@ func evalBuiltinFunc(f builtinFunc, row chunk.Row) (d types.Datum, err error) {
 
 	if isNull || err != nil {
 		d.SetValue(nil)
-		return d, errors.Trace(err)
+		return d, err
 	}
 	d.SetValue(res)
 	return
@@ -145,7 +144,7 @@ func newFunctionForTest(ctx sessionctx.Context, funcName string, args ...Express
 	copy(funcArgs, args)
 	f, err := fc.getFunction(ctx, funcArgs)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	return &ScalarFunction{
 		FuncName: model.NewCIStr(funcName),

@@ -14,17 +14,17 @@
 package tikv
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"sync"
 	"time"
 
 	. "github.com/pingcap/check"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/mockstore/mocktikv"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 var (
@@ -61,7 +61,7 @@ func clearStorage(store kv.Storage) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	iter, err := txn.Seek(nil)
+	iter, err := txn.Iter(nil, nil)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -93,7 +93,7 @@ func (s *testTiclientSuite) SetUpSuite(c *C) {
 func (s *testTiclientSuite) TearDownSuite(c *C) {
 	// Clean all data, or it may pollute other data.
 	txn := s.beginTxn(c)
-	scanner, err := txn.Seek(encodeKey(s.prefix, ""))
+	scanner, err := txn.Iter(encodeKey(s.prefix, ""), nil)
 	c.Assert(err, IsNil)
 	c.Assert(scanner, NotNil)
 	for scanner.Valid() {
@@ -119,7 +119,7 @@ func (s *testTiclientSuite) TestSingleKey(c *C) {
 	txn := s.beginTxn(c)
 	err := txn.Set(encodeKey(s.prefix, "key"), []byte("value"))
 	c.Assert(err, IsNil)
-	err = txn.LockKeys(encodeKey(s.prefix, "key"))
+	err = txn.LockKeys(context.Background(), 0, encodeKey(s.prefix, "key"))
 	c.Assert(err, IsNil)
 	err = txn.Commit(context.Background())
 	c.Assert(err, IsNil)
@@ -176,7 +176,7 @@ func (s *testTiclientSuite) TestLargeRequest(c *C) {
 	c.Assert(err, NotNil)
 	err = txn.Commit(context.Background())
 	c.Assert(err, IsNil)
-	c.Assert(kv.IsRetryableError(err), IsFalse)
+	c.Assert(kv.IsTxnRetryableError(err), IsFalse)
 }
 
 func encodeKey(prefix, s string) []byte {

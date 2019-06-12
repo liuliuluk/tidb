@@ -15,79 +15,34 @@ package mocktikv
 
 import (
 	"bytes"
-	"fmt"
+	"context"
 	"io"
-	"sync"
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/tikvpb"
+	"github.com/pingcap/parser/model"
+	"github.com/pingcap/parser/mysql"
+	"github.com/pingcap/parser/terror"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/expression/aggregation"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/tablecodec"
-	"github.com/pingcap/tidb/terror"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
 	mockpkg "github.com/pingcap/tidb/util/mock"
+	"github.com/pingcap/tidb/util/timeutil"
 	"github.com/pingcap/tipb/go-tipb"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
 
 var dummySlice = make([]byte, 0)
-
-// locCache is a simple map with lock. It stores all used timezone during the lifetime of tidb instance.
-// Talked with Golang team about whether they can have some forms of cache policy available for programmer,
-// they suggests that only programmers knows which one is best for their use case.
-// For detail, please refer to: https://github.com/golang/go/issues/26106
-type locCache struct {
-	sync.RWMutex
-	// locMap stores locations used in past and can be retrieved by a timezone's name.
-	locMap map[string]*time.Location
-}
-
-// init initializes `locCache`.
-func init() {
-	LocCache = &locCache{}
-	LocCache.locMap = make(map[string]*time.Location)
-}
-
-// LocCache is a simple cache policy to improve the performance of 'time.LoadLocation'.
-var LocCache *locCache
-
-// getLoc first trying to load location from a cache map. If nothing found in such map, then call
-// `time.LocadLocation` to get a timezone location. After trying both way, an error wil be returned
-//  if valid Location is not found.
-func (lm *locCache) getLoc(name string) (*time.Location, error) {
-	if name == "System" {
-		name = "Local"
-	}
-	lm.RLock()
-	if v, ok := lm.locMap[name]; ok {
-		lm.RUnlock()
-		return v, nil
-	}
-
-	if loc, err := time.LoadLocation(name); err == nil {
-		lm.RUnlock()
-		lm.Lock()
-		lm.locMap[name] = loc
-		lm.Unlock()
-		return loc, nil
-	}
-
-	lm.RUnlock()
-	return nil, fmt.Errorf("invalid name for timezone %s", name)
-}
 
 type dagContext struct {
 	dagReq    *tipb.DAGRequest
@@ -129,7 +84,12 @@ func (h *rpcHandler) handleCopDAGRequest(req *coprocessor.Request) *coprocessor.
 		rowCnt++
 	}
 	warnings := dagCtx.evalCtx.sc.GetWarnings()
-	return buildResp(chunks, e.Counts(), err, warnings)
+
+	var execDetails []*execDetail
+	if dagReq.CollectExecutionSummaries != nil && *dagReq.CollectExecutionSummaries {
+		execDetails = e.ExecDetails()
+	}
+	return buildResp(chunks, e.Counts(), execDetails, err, warnings)
 }
 
 func (h *rpcHandler) buildDAGExecutor(req *coprocessor.Request) (*dagContext, executor, *tipb.DAGRequest, error) {
@@ -169,8 +129,9 @@ func (h *rpcHandler) buildDAGExecutor(req *coprocessor.Request) (*dagContext, ex
 // timezone offset in seconds east of UTC is used to constructed the timezone.
 func constructTimeZone(name string, offset int) (*time.Location, error) {
 	if name != "" {
-		return LocCache.getLoc(name)
+		return timeutil.LoadLocation(name)
 	}
+
 	return time.FixedZone("", offset), nil
 }
 
@@ -205,7 +166,7 @@ func (h *rpcHandler) buildExec(ctx *dagContext, curr *tipb.Executor) (executor, 
 	case tipb.ExecType_TypeTopN:
 		currExec, err = h.buildTopN(ctx, curr)
 	case tipb.ExecType_TypeLimit:
-		currExec = &limitExec{limit: curr.Limit.GetLimit()}
+		currExec = &limitExec{limit: curr.Limit.GetLimit(), execDetail: new(execDetail)}
 	default:
 		// TODO: Support other types.
 		err = errors.Errorf("this exec type %v doesn't support yet.", curr.GetTp())
@@ -242,6 +203,7 @@ func (h *rpcHandler) buildTableScan(ctx *dagContext, executor *tipb.Executor) (*
 		startTS:        ctx.dagReq.GetStartTs(),
 		isolationLevel: h.isolationLevel,
 		mvccStore:      h.mvccStore,
+		execDetail:     new(execDetail),
 	}
 	if ctx.dagReq.CollectRangeCounts != nil && *ctx.dagReq.CollectRangeCounts {
 		e.counts = make([]int64, len(ranges))
@@ -280,6 +242,7 @@ func (h *rpcHandler) buildIndexScan(ctx *dagContext, executor *tipb.Executor) (*
 		isolationLevel: h.isolationLevel,
 		mvccStore:      h.mvccStore,
 		pkStatus:       pkStatus,
+		execDetail:     new(execDetail),
 	}
 	if ctx.dagReq.CollectRangeCounts != nil && *ctx.dagReq.CollectRangeCounts {
 		e.counts = make([]int64, len(ranges))
@@ -307,6 +270,7 @@ func (h *rpcHandler) buildSelection(ctx *dagContext, executor *tipb.Executor) (*
 		relatedColOffsets: relatedColOffsets,
 		conditions:        conds,
 		row:               make([]types.Datum, len(ctx.evalCtx.columnInfos)),
+		execDetail:        new(execDetail),
 	}, nil
 }
 
@@ -355,6 +319,7 @@ func (h *rpcHandler) buildHashAgg(ctx *dagContext, executor *tipb.Executor) (*ha
 		groupKeys:         make([][]byte, 0),
 		relatedColOffsets: relatedColOffsets,
 		row:               make([]types.Datum, len(ctx.evalCtx.columnInfos)),
+		execDetail:        new(execDetail),
 	}, nil
 }
 
@@ -376,6 +341,7 @@ func (h *rpcHandler) buildStreamAgg(ctx *dagContext, executor *tipb.Executor) (*
 		currGroupByValues: make([][]byte, 0),
 		relatedColOffsets: relatedColOffsets,
 		row:               make([]types.Datum, len(ctx.evalCtx.columnInfos)),
+		execDetail:        new(execDetail),
 	}, nil
 }
 
@@ -410,6 +376,7 @@ func (h *rpcHandler) buildTopN(ctx *dagContext, executor *tipb.Executor) (*topNE
 		relatedColOffsets: relatedColOffsets,
 		orderByExprs:      conds,
 		row:               make([]types.Datum, len(ctx.evalCtx.columnInfos)),
+		execDetail:        new(execDetail),
 	}, nil
 }
 
@@ -507,7 +474,6 @@ func (mock *mockCopStreamClient) Recv() (*coprocessor.Response, error) {
 	}
 
 	var resp coprocessor.Response
-	counts := make([]int64, len(mock.req.Executors))
 	chunk, finish, ran, counts, warnings, err := mock.readBlockFromExecutor()
 	resp.Range = ran
 	if err != nil {
@@ -590,12 +556,26 @@ func (mock *mockCopStreamClient) readBlockFromExecutor() (tipb.Chunk, bool, *cop
 	return chunk, finish, &ran, mock.exec.Counts(), warnings, nil
 }
 
-func buildResp(chunks []tipb.Chunk, counts []int64, err error, warnings []stmtctx.SQLWarn) *coprocessor.Response {
+func buildResp(chunks []tipb.Chunk, counts []int64, execDetails []*execDetail, err error, warnings []stmtctx.SQLWarn) *coprocessor.Response {
 	resp := &coprocessor.Response{}
 	selResp := &tipb.SelectResponse{
 		Error:        toPBError(err),
 		Chunks:       chunks,
 		OutputCounts: counts,
+	}
+	if len(execDetails) > 0 {
+		execSummary := make([]*tipb.ExecutorExecutionSummary, 0, len(execDetails))
+		for _, d := range execDetails {
+			costNs := uint64(d.timeProcessed / time.Nanosecond)
+			rows := uint64(d.numProducedRows)
+			numIter := uint64(d.numIterations)
+			execSummary = append(execSummary, &tipb.ExecutorExecutionSummary{
+				TimeProcessedNs: &costNs,
+				NumProducedRows: &rows,
+				NumIterations:   &numIter,
+			})
+		}
+		selResp.ExecutionSummaries = execSummary
 	}
 	if len(warnings) > 0 {
 		selResp.Warnings = make([]*tipb.Error, 0, len(warnings))

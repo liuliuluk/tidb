@@ -14,24 +14,28 @@
 package executor
 
 import (
+	"context"
+	"fmt"
+
+	"github.com/opentracing/opentracing-go"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
+	"github.com/pingcap/tidb/util/logutil"
+	"go.uber.org/zap"
 )
 
 // ReplaceExec represents a replace executor.
 type ReplaceExec struct {
 	*InsertValues
 	Priority int
-	finished bool
 }
 
 // Close implements the Executor Close interface.
 func (e *ReplaceExec) Close() error {
+	e.setMessage()
 	if e.SelectExec != nil {
 		return e.SelectExec.Close()
 	}
@@ -43,6 +47,7 @@ func (e *ReplaceExec) Open(ctx context.Context) error {
 	if e.SelectExec != nil {
 		return e.SelectExec.Open(ctx)
 	}
+	e.initEvalBuffer()
 	return nil
 }
 
@@ -50,14 +55,14 @@ func (e *ReplaceExec) Open(ctx context.Context) error {
 // but if the to-be-removed row equals to the to-be-added row, no remove or add things to do.
 func (e *ReplaceExec) removeRow(handle int64, r toBeCheckedRow) (bool, error) {
 	newRow := r.row
-	oldRow, err := e.batchChecker.getOldRow(e.ctx, r.t, handle)
+	oldRow, err := e.batchChecker.getOldRow(e.ctx, r.t, handle, e.GenExprs)
 	if err != nil {
-		log.Errorf("[replace] handle is %d for the to-be-inserted row %v", handle, types.DatumsToStrNoErr(r.row))
-		return false, errors.Trace(err)
+		logutil.Logger(context.Background()).Error("get old row failed when replace", zap.Int64("handle", handle), zap.String("toBeInsertedRow", types.DatumsToStrNoErr(r.row)))
+		return false, err
 	}
 	rowUnchanged, err := types.EqualDatums(e.ctx.GetSessionVars().StmtCtx, oldRow, newRow)
 	if err != nil {
-		return false, errors.Trace(err)
+		return false, err
 	}
 	if rowUnchanged {
 		e.ctx.GetSessionVars().StmtCtx.AddAffectedRows(1)
@@ -66,18 +71,14 @@ func (e *ReplaceExec) removeRow(handle int64, r toBeCheckedRow) (bool, error) {
 
 	err = r.t.RemoveRecord(e.ctx, handle, oldRow)
 	if err != nil {
-		return false, errors.Trace(err)
+		return false, err
 	}
 	e.ctx.GetSessionVars().StmtCtx.AddAffectedRows(1)
 
 	// Cleanup keys map, because the record was removed.
-	cleanupRows, err := e.getKeysNeedCheck(e.ctx, r.t, [][]types.Datum{oldRow})
+	err = e.deleteDupKeys(e.ctx, r.t, [][]types.Datum{oldRow})
 	if err != nil {
-		return false, errors.Trace(err)
-	}
-	if len(cleanupRows) > 0 {
-		// The length of need-to-cleanup rows should be at most 1, due to we only input 1 row.
-		e.deleteDupKeys(cleanupRows[0])
+		return false, err
 	}
 	return false, nil
 }
@@ -88,11 +89,11 @@ func (e *ReplaceExec) replaceRow(r toBeCheckedRow) error {
 		if _, found := e.dupKVs[string(r.handleKey.newKV.key)]; found {
 			handle, err := tablecodec.DecodeRowKey(r.handleKey.newKV.key)
 			if err != nil {
-				return errors.Trace(err)
+				return err
 			}
 			rowUnchanged, err := e.removeRow(handle, r)
 			if err != nil {
-				return errors.Trace(err)
+				return err
 			}
 			if rowUnchanged {
 				return nil
@@ -104,7 +105,7 @@ func (e *ReplaceExec) replaceRow(r toBeCheckedRow) error {
 	for {
 		rowUnchanged, foundDupKey, err := e.removeIndexRow(r)
 		if err != nil {
-			return errors.Trace(err)
+			return err
 		}
 		if rowUnchanged {
 			return nil
@@ -118,7 +119,7 @@ func (e *ReplaceExec) replaceRow(r toBeCheckedRow) error {
 	// No duplicated rows now, insert the row.
 	newHandle, err := e.addRecord(r.row)
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
 	e.fillBackKeys(r.t, r, newHandle)
 	return nil
@@ -135,11 +136,11 @@ func (e *ReplaceExec) removeIndexRow(r toBeCheckedRow) (bool, bool, error) {
 		if val, found := e.dupKVs[string(uk.newKV.key)]; found {
 			handle, err := tables.DecodeHandle(val)
 			if err != nil {
-				return false, found, errors.Trace(err)
+				return false, found, err
 			}
 			rowUnchanged, err := e.removeRow(handle, r)
 			if err != nil {
-				return false, found, errors.Trace(err)
+				return false, found, err
 			}
 			return rowUnchanged, found, nil
 		}
@@ -147,7 +148,7 @@ func (e *ReplaceExec) removeIndexRow(r toBeCheckedRow) (bool, bool, error) {
 	return false, false, nil
 }
 
-func (e *ReplaceExec) exec(newRows [][]types.Datum) error {
+func (e *ReplaceExec) exec(ctx context.Context, newRows [][]types.Datum) error {
 	/*
 	 * MySQL uses the following algorithm for REPLACE (and LOAD DATA ... REPLACE):
 	 *  1. Try to insert the new row into the table
@@ -162,38 +163,45 @@ func (e *ReplaceExec) exec(newRows [][]types.Datum) error {
 	 */
 	err := e.batchGetInsertKeys(e.ctx, e.Table, newRows)
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
 
 	// Batch get the to-be-replaced rows in storage.
 	err = e.initDupOldRowValue(e.ctx, e.Table, newRows)
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
-
+	e.ctx.GetSessionVars().StmtCtx.AddRecordRows(uint64(len(newRows)))
 	for _, r := range e.toBeCheckedRows {
 		err = e.replaceRow(r)
 		if err != nil {
-			return errors.Trace(err)
+			return err
 		}
 	}
-	e.finished = true
 	return nil
 }
 
 // Next implements the Executor Next interface.
-func (e *ReplaceExec) Next(ctx context.Context, chk *chunk.Chunk) error {
-	chk.Reset()
-	if e.finished {
-		return nil
+func (e *ReplaceExec) Next(ctx context.Context, req *chunk.RecordBatch) error {
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan("replace.Next", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
 	}
-	cols, err := e.getColumns(e.Table.Cols())
-	if err != nil {
-		return errors.Trace(err)
-	}
-
+	req.Reset()
 	if len(e.children) > 0 && e.children[0] != nil {
-		return errors.Trace(e.insertRowsFromSelect(ctx, cols, e.exec))
+		return e.insertRowsFromSelect(ctx, e.exec)
 	}
-	return errors.Trace(e.insertRows(cols, e.exec))
+	return e.insertRows(ctx, e.exec)
+}
+
+// setMessage sets info message(ERR_INSERT_INFO) generated by REPLACE statement
+func (e *ReplaceExec) setMessage() {
+	stmtCtx := e.ctx.GetSessionVars().StmtCtx
+	numRecords := stmtCtx.RecordRows()
+	if e.SelectExec != nil || numRecords > 1 {
+		numWarnings := stmtCtx.WarningCount()
+		numDuplicates := stmtCtx.AffectedRows() - numRecords
+		msg := fmt.Sprintf(mysql.MySQLErrName[mysql.ErrInsertInfo], numRecords, numDuplicates, numWarnings)
+		stmtCtx.SetMessage(msg)
+	}
 }

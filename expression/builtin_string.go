@@ -19,6 +19,7 @@ package expression
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -27,16 +28,17 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/pingcap/tidb/ast"
-	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/parser/ast"
+	"github.com/pingcap/parser/charset"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/charset"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/hack"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
+	"github.com/pingcap/tidb/util/logutil"
+	"go.uber.org/zap"
 	"golang.org/x/text/transform"
 )
 
@@ -180,7 +182,7 @@ type lengthFunctionClass struct {
 
 func (c *lengthFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 10
@@ -203,7 +205,7 @@ func (b *builtinLengthSig) Clone() builtinFunc {
 func (b *builtinLengthSig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	return int64(len([]byte(val))), false, nil
 }
@@ -214,7 +216,7 @@ type asciiFunctionClass struct {
 
 func (c *asciiFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 3
@@ -237,7 +239,7 @@ func (b *builtinASCIISig) Clone() builtinFunc {
 func (b *builtinASCIISig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	if len(val) == 0 {
 		return 0, false, nil
@@ -251,7 +253,7 @@ type concatFunctionClass struct {
 
 func (c *concatFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	argTps := make([]types.EvalType, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -264,7 +266,7 @@ func (c *concatFunctionClass) getFunction(ctx sessionctx.Context, args []Express
 
 		if argType.Flen < 0 {
 			bf.tp.Flen = mysql.MaxBlobWidth
-			log.Warningf("Not Expected: `Flen` of arg[%v] in CONCAT is -1.", i)
+			logutil.Logger(context.Background()).Warn("unexpected `Flen` value(-1) in CONCAT's args", zap.Int("arg's index", i))
 		}
 		bf.tp.Flen += argType.Flen
 	}
@@ -292,7 +294,7 @@ func (b *builtinConcatSig) evalString(row chunk.Row) (d string, isNull bool, err
 	for _, a := range b.getArgs() {
 		d, isNull, err = a.EvalString(b.ctx, row)
 		if isNull || err != nil {
-			return d, isNull, errors.Trace(err)
+			return d, isNull, err
 		}
 		s = append(s, []byte(d)...)
 	}
@@ -305,7 +307,7 @@ type concatWSFunctionClass struct {
 
 func (c *concatWSFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	argTps := make([]types.EvalType, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -322,7 +324,7 @@ func (c *concatWSFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		if i != 0 {
 			if argType.Flen < 0 {
 				bf.tp.Flen = mysql.MaxBlobWidth
-				log.Warningf("Not Expected: `Flen` of arg[%v] in CONCAT_WS is -1.", i)
+				logutil.Logger(context.Background()).Warn("unexpected `Flen` value(-1) in CONCAT_WS's args", zap.Int("arg's index", i))
 			}
 			bf.tp.Flen += argType.Flen
 		}
@@ -359,7 +361,7 @@ func (b *builtinConcatWSSig) evalString(row chunk.Row) (string, bool, error) {
 	for i, arg := range args {
 		val, isNull, err := arg.EvalString(b.ctx, row)
 		if err != nil {
-			return val, isNull, errors.Trace(err)
+			return val, isNull, err
 		}
 
 		if isNull {
@@ -389,7 +391,7 @@ type leftFunctionClass struct {
 
 func (c *leftFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETInt)
 	argType := args[0].GetType()
@@ -418,11 +420,11 @@ func (b *builtinLeftBinarySig) Clone() builtinFunc {
 func (b *builtinLeftBinarySig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	left, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	leftLength := int(left)
 	if strLength := len(str); leftLength > strLength {
@@ -448,11 +450,11 @@ func (b *builtinLeftSig) Clone() builtinFunc {
 func (b *builtinLeftSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	left, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	runes, leftLength := []rune(str), int(left)
 	if runeLength := len(runes); leftLength > runeLength {
@@ -469,7 +471,7 @@ type rightFunctionClass struct {
 
 func (c *rightFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETInt)
 	argType := args[0].GetType()
@@ -498,11 +500,11 @@ func (b *builtinRightBinarySig) Clone() builtinFunc {
 func (b *builtinRightBinarySig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	right, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	strLength, rightLength := len(str), int(right)
 	if rightLength > strLength {
@@ -528,11 +530,11 @@ func (b *builtinRightSig) Clone() builtinFunc {
 func (b *builtinRightSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	right, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	runes := []rune(str)
 	strLength, rightLength := len(runes), int(right)
@@ -550,7 +552,7 @@ type repeatFunctionClass struct {
 
 func (c *repeatFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETInt)
 	bf.tp.Flen = mysql.MaxBlobWidth
@@ -558,7 +560,7 @@ func (c *repeatFunctionClass) getFunction(ctx sessionctx.Context, args []Express
 	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
 	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	sig := &builtinRepeatSig{bf, maxAllowedPacket}
 	return sig, nil
@@ -581,13 +583,13 @@ func (b *builtinRepeatSig) Clone() builtinFunc {
 func (b *builtinRepeatSig) evalString(row chunk.Row) (d string, isNull bool, err error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 	byteLength := len(str)
 
 	num, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 	if num < 1 {
 		return "", false, nil
@@ -613,7 +615,7 @@ type lowerFunctionClass struct {
 
 func (c *lowerFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	argTp := args[0].GetType()
@@ -638,7 +640,7 @@ func (b *builtinLowerSig) Clone() builtinFunc {
 func (b *builtinLowerSig) evalString(row chunk.Row) (d string, isNull bool, err error) {
 	d, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 
 	if types.IsBinaryStr(b.args[0].GetType()) {
@@ -654,7 +656,7 @@ type reverseFunctionClass struct {
 
 func (c *reverseFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	retTp := *args[0].GetType()
@@ -685,7 +687,7 @@ func (b *builtinReverseBinarySig) Clone() builtinFunc {
 func (b *builtinReverseBinarySig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	reversed := reverseBytes([]byte(str))
 	return string(reversed), false, nil
@@ -706,7 +708,7 @@ func (b *builtinReverseSig) Clone() builtinFunc {
 func (b *builtinReverseSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	reversed := reverseRunes([]rune(str))
 	return string(reversed), false, nil
@@ -718,14 +720,14 @@ type spaceFunctionClass struct {
 
 func (c *spaceFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETInt)
 	bf.tp.Flen = mysql.MaxBlobWidth
 	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
 	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	sig := &builtinSpaceSig{bf, maxAllowedPacket}
 	return sig, nil
@@ -750,7 +752,7 @@ func (b *builtinSpaceSig) evalString(row chunk.Row) (d string, isNull bool, err 
 
 	x, isNull, err = b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	if x < 0 {
 		x = 0
@@ -771,7 +773,7 @@ type upperFunctionClass struct {
 
 func (c *upperFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	argTp := args[0].GetType()
@@ -796,7 +798,7 @@ func (b *builtinUpperSig) Clone() builtinFunc {
 func (b *builtinUpperSig) evalString(row chunk.Row) (d string, isNull bool, err error) {
 	d, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 
 	if types.IsBinaryStr(b.args[0].GetType()) {
@@ -812,7 +814,7 @@ type strcmpFunctionClass struct {
 
 func (c *strcmpFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString, types.ETString)
 	bf.tp.Flen = 2
@@ -842,11 +844,11 @@ func (b *builtinStrcmpSig) evalInt(row chunk.Row) (int64, bool, error) {
 
 	left, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	right, isNull, err = b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	res := types.CompareString(left, right)
 	return int64(res), false, nil
@@ -858,7 +860,7 @@ type replaceFunctionClass struct {
 
 func (c *replaceFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETString, types.ETString)
 	bf.tp.Flen = c.fixLength(args)
@@ -897,15 +899,15 @@ func (b *builtinReplaceSig) evalString(row chunk.Row) (d string, isNull bool, er
 
 	str, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	oldStr, isNull, err = b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	newStr, isNull, err = b.args[2].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	if oldStr == "" {
 		return str, false, nil
@@ -919,12 +921,36 @@ type convertFunctionClass struct {
 
 func (c *convertFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETString)
-	// TODO: issue #4436: The second parameter should be a constant.
-	// TODO: issue #4474: Charset supported by TiDB and MySQL is not the same.
-	// TODO: Fix #4436 && #4474, set the correct charset and flag of `bf.tp`.
+
+	charsetArg, ok := args[1].(*Constant)
+	if !ok {
+		// `args[1]` is limited by parser to be a constant string,
+		// should never go into here.
+		return nil, errIncorrectArgs.GenWithStackByArgs("charset")
+	}
+	transcodingName := charsetArg.Value.GetString()
+	bf.tp.Charset = strings.ToLower(transcodingName)
+	// Quoted about the behavior of syntax CONVERT(expr, type) to CHAR():
+	// In all cases, the string has the default collation for the character set.
+	// See https://dev.mysql.com/doc/refman/5.7/en/cast-functions.html#function_convert
+	// Here in syntax CONVERT(expr USING transcoding_name), behavior is kept the same,
+	// picking the default collation of target charset.
+	var err error
+	bf.tp.Collate, err = charset.GetDefaultCollation(bf.tp.Charset)
+	if err != nil {
+		return nil, errUnknownCharacterSet.GenWithStackByArgs(transcodingName)
+	}
+	// Result will be a binary string if converts charset to BINARY.
+	// See https://dev.mysql.com/doc/refman/5.7/en/charset-binary-set.html
+	if types.IsBinaryStr(bf.tp) {
+		types.SetBinChsClnFlag(bf.tp)
+	} else {
+		bf.tp.Flag &= ^mysql.BinaryFlag
+	}
+
 	bf.tp.Flen = mysql.MaxBlobWidth
 	sig := &builtinConvertSig{bf}
 	return sig, nil
@@ -941,25 +967,25 @@ func (b *builtinConvertSig) Clone() builtinFunc {
 }
 
 // evalString evals CONVERT(expr USING transcoding_name).
+// Syntax CONVERT(expr, type) is parsed as cast expr so not handled here.
 // See https://dev.mysql.com/doc/refman/5.7/en/cast-functions.html#function_convert
 func (b *builtinConvertSig) evalString(row chunk.Row) (string, bool, error) {
 	expr, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
-	charsetName, isNull, err := b.args[1].EvalString(b.ctx, row)
-	if isNull || err != nil {
-		return "", true, errors.Trace(err)
-	}
-
-	encoding, _ := charset.Lookup(charsetName)
+	// Since charset is already validated and set from getFunction(), there's no
+	// need to get charset from args again.
+	encoding, _ := charset.Lookup(b.tp.Charset)
+	// However, if `b.tp.Charset` is abnormally set to a wrong charset, we still
+	// return with error.
 	if encoding == nil {
-		return "", true, errUnknownCharacterSet.GenWithStackByArgs(charsetName)
+		return "", true, errUnknownCharacterSet.GenWithStackByArgs(b.tp.Charset)
 	}
 
 	target, _, err := transform.String(encoding.NewDecoder(), expr)
-	return target, err != nil, errors.Trace(err)
+	return target, err != nil, err
 }
 
 type substringFunctionClass struct {
@@ -968,7 +994,7 @@ type substringFunctionClass struct {
 
 func (c *substringFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	argTps := []types.EvalType{types.ETString, types.ETInt}
 	if len(args) == 3 {
@@ -1012,11 +1038,11 @@ func (b *builtinSubstringBinary2ArgsSig) Clone() builtinFunc {
 func (b *builtinSubstringBinary2ArgsSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	pos, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	length := int64(len(str))
 	if pos < 0 {
@@ -1045,11 +1071,11 @@ func (b *builtinSubstring2ArgsSig) Clone() builtinFunc {
 func (b *builtinSubstring2ArgsSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	pos, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	runes := []rune(str)
 	length := int64(len(runes))
@@ -1079,15 +1105,15 @@ func (b *builtinSubstringBinary3ArgsSig) Clone() builtinFunc {
 func (b *builtinSubstringBinary3ArgsSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	pos, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	length, isNull, err := b.args[2].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	byteLen := int64(len(str))
 	if pos < 0 {
@@ -1122,15 +1148,15 @@ func (b *builtinSubstring3ArgsSig) Clone() builtinFunc {
 func (b *builtinSubstring3ArgsSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	pos, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	length, isNull, err := b.args[2].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	runes := []rune(str)
 	numRunes := int64(len(runes))
@@ -1157,7 +1183,7 @@ type substringIndexFunctionClass struct {
 
 func (c *substringIndexFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETString, types.ETInt)
 	argType := args[0].GetType()
@@ -1186,15 +1212,15 @@ func (b *builtinSubstringIndexSig) evalString(row chunk.Row) (d string, isNull b
 	)
 	str, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	delim, isNull, err = b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	count, isNull, err = b.args[2].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	if len(delim) == 0 {
 		return "", false, nil
@@ -1210,6 +1236,11 @@ func (b *builtinSubstringIndexSig) evalString(row chunk.Row) (d string, isNull b
 	} else {
 		// If count is negative, everything to the right of the final delimiter (counting from the right) is returned.
 		count = -count
+		if count < 0 {
+			// -count overflows max int64, returns an empty string.
+			return "", false, nil
+		}
+
 		if count < end {
 			start = end - count
 		}
@@ -1224,7 +1255,7 @@ type locateFunctionClass struct {
 
 func (c *locateFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	hasStartPos, argTps := len(args) == 3, []types.EvalType{types.ETString, types.ETString}
 	if hasStartPos {
@@ -1262,11 +1293,11 @@ func (b *builtinLocateBinary2ArgsSig) Clone() builtinFunc {
 func (b *builtinLocateBinary2ArgsSig) evalInt(row chunk.Row) (int64, bool, error) {
 	subStr, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	str, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	subStrLen := len(subStr)
 	if subStrLen == 0 {
@@ -1294,11 +1325,11 @@ func (b *builtinLocate2ArgsSig) Clone() builtinFunc {
 func (b *builtinLocate2ArgsSig) evalInt(row chunk.Row) (int64, bool, error) {
 	subStr, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	str, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	if int64(len([]rune(subStr))) == 0 {
 		return 1, false, nil
@@ -1326,17 +1357,17 @@ func (b *builtinLocateBinary3ArgsSig) Clone() builtinFunc {
 func (b *builtinLocateBinary3ArgsSig) evalInt(row chunk.Row) (int64, bool, error) {
 	subStr, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	str, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	pos, isNull, err := b.args[2].EvalInt(b.ctx, row)
 	// Transfer the argument which starts from 1 to real index which starts from 0.
 	pos--
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	subStrLen := len(subStr)
 	if pos < 0 || pos > int64(len(str)-subStrLen) {
@@ -1367,17 +1398,17 @@ func (b *builtinLocate3ArgsSig) Clone() builtinFunc {
 func (b *builtinLocate3ArgsSig) evalInt(row chunk.Row) (int64, bool, error) {
 	subStr, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	str, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	pos, isNull, err := b.args[2].EvalInt(b.ctx, row)
 	// Transfer the argument which starts from 1 to real index which starts from 0.
 	pos--
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	subStrLen := len([]rune(subStr))
 	if pos < 0 || pos > int64(len([]rune(strings.ToLower(str)))-subStrLen) {
@@ -1399,7 +1430,7 @@ type hexFunctionClass struct {
 
 func (c *hexFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	argTp := args[0].GetType().EvalType()
@@ -1435,7 +1466,7 @@ func (b *builtinHexStrArgSig) Clone() builtinFunc {
 func (b *builtinHexStrArgSig) evalString(row chunk.Row) (string, bool, error) {
 	d, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	return strings.ToUpper(hex.EncodeToString(hack.Slice(d))), false, nil
 }
@@ -1455,7 +1486,7 @@ func (b *builtinHexIntArgSig) Clone() builtinFunc {
 func (b *builtinHexIntArgSig) evalString(row chunk.Row) (string, bool, error) {
 	x, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 	return strings.ToUpper(fmt.Sprintf("%x", uint64(x))), false, nil
 }
@@ -1466,12 +1497,12 @@ type unhexFunctionClass struct {
 
 func (c *unhexFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	var retFlen int
 
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	argType := args[0].GetType()
 	argEvalTp := argType.EvalType()
@@ -1510,7 +1541,7 @@ func (b *builtinUnHexSig) evalString(row chunk.Row) (string, bool, error) {
 
 	d, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	// Add a '0' to the front, if the length is not the multiple of 2
 	if len(d)%2 != 0 {
@@ -1534,7 +1565,7 @@ type trimFunctionClass struct {
 // but we wil convert it into trim(str), trim(str, remstr) and trim(str, remstr, direction) in AST.
 func (c *trimFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	switch len(args) {
@@ -1562,7 +1593,7 @@ func (c *trimFunctionClass) getFunction(ctx sessionctx.Context, args []Expressio
 		return sig, nil
 
 	default:
-		return nil, errors.Trace(c.verifyArgs(args))
+		return nil, c.verifyArgs(args)
 	}
 }
 
@@ -1581,7 +1612,7 @@ func (b *builtinTrim1ArgSig) Clone() builtinFunc {
 func (b *builtinTrim1ArgSig) evalString(row chunk.Row) (d string, isNull bool, err error) {
 	d, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	return strings.Trim(d, spaceChars), false, nil
 }
@@ -1603,11 +1634,11 @@ func (b *builtinTrim2ArgsSig) evalString(row chunk.Row) (d string, isNull bool, 
 
 	str, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	remstr, isNull, err = b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	d = trimLeft(str, remstr)
 	d = trimRight(d, remstr)
@@ -1635,15 +1666,15 @@ func (b *builtinTrim3ArgsSig) evalString(row chunk.Row) (d string, isNull bool, 
 	)
 	str, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	remstr, isRemStrNull, err = b.args[1].EvalString(b.ctx, row)
 	if err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	x, isNull, err = b.args[2].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	direction = ast.TrimDirectionType(x)
 	if direction == ast.TrimLeading {
@@ -1675,7 +1706,7 @@ type lTrimFunctionClass struct {
 
 func (c *lTrimFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	argType := args[0].GetType()
@@ -1700,7 +1731,7 @@ func (b *builtinLTrimSig) Clone() builtinFunc {
 func (b *builtinLTrimSig) evalString(row chunk.Row) (d string, isNull bool, err error) {
 	d, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	return strings.TrimLeft(d, spaceChars), false, nil
 }
@@ -1711,7 +1742,7 @@ type rTrimFunctionClass struct {
 
 func (c *rTrimFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	argType := args[0].GetType()
@@ -1736,7 +1767,7 @@ func (b *builtinRTrimSig) Clone() builtinFunc {
 func (b *builtinRTrimSig) evalString(row chunk.Row) (d string, isNull bool, err error) {
 	d, isNull, err = b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return d, isNull, errors.Trace(err)
+		return d, isNull, err
 	}
 	return strings.TrimRight(d, spaceChars), false, nil
 }
@@ -1765,7 +1796,7 @@ func getFlen4LpadAndRpad(ctx sessionctx.Context, arg Expression) int {
 	if constant, ok := arg.(*Constant); ok {
 		length, isNull, err := constant.EvalInt(ctx, chunk.Row{})
 		if err != nil {
-			log.Errorf("getFlen4LpadAndRpad with error: %v", err.Error())
+			logutil.Logger(context.Background()).Error("eval `Flen` for LPAD/RPAD", zap.Error(err))
 		}
 		if isNull || err != nil || length > mysql.MaxBlobWidth {
 			return mysql.MaxBlobWidth
@@ -1781,7 +1812,7 @@ type lpadFunctionClass struct {
 
 func (c *lpadFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETInt, types.ETString)
 	bf.tp.Flen = getFlen4LpadAndRpad(bf.ctx, args[1])
@@ -1791,7 +1822,7 @@ func (c *lpadFunctionClass) getFunction(ctx sessionctx.Context, args []Expressio
 	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
 	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	if types.IsBinaryStr(args[0].GetType()) || types.IsBinaryStr(args[2].GetType()) {
@@ -1822,13 +1853,13 @@ func (b *builtinLpadBinarySig) Clone() builtinFunc {
 func (b *builtinLpadBinarySig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	byteLength := len(str)
 
 	length, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	targetLength := int(length)
 
@@ -1839,7 +1870,7 @@ func (b *builtinLpadBinarySig) evalString(row chunk.Row) (string, bool, error) {
 
 	padStr, isNull, err := b.args[2].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	padLength := len(padStr)
 
@@ -1871,13 +1902,13 @@ func (b *builtinLpadSig) Clone() builtinFunc {
 func (b *builtinLpadSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	runeLength := len([]rune(str))
 
 	length, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	targetLength := int(length)
 
@@ -1888,7 +1919,7 @@ func (b *builtinLpadSig) evalString(row chunk.Row) (string, bool, error) {
 
 	padStr, isNull, err := b.args[2].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	padLength := len([]rune(padStr))
 
@@ -1909,7 +1940,7 @@ type rpadFunctionClass struct {
 
 func (c *rpadFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETInt, types.ETString)
 	bf.tp.Flen = getFlen4LpadAndRpad(bf.ctx, args[1])
@@ -1919,7 +1950,7 @@ func (c *rpadFunctionClass) getFunction(ctx sessionctx.Context, args []Expressio
 	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
 	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	if types.IsBinaryStr(args[0].GetType()) || types.IsBinaryStr(args[2].GetType()) {
@@ -1950,13 +1981,13 @@ func (b *builtinRpadBinarySig) Clone() builtinFunc {
 func (b *builtinRpadBinarySig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	byteLength := len(str)
 
 	length, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	targetLength := int(length)
 	if uint64(targetLength) > b.maxAllowedPacket {
@@ -1966,7 +1997,7 @@ func (b *builtinRpadBinarySig) evalString(row chunk.Row) (string, bool, error) {
 
 	padStr, isNull, err := b.args[2].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	padLength := len(padStr)
 
@@ -1998,13 +2029,13 @@ func (b *builtinRpadSig) Clone() builtinFunc {
 func (b *builtinRpadSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	runeLength := len([]rune(str))
 
 	length, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	targetLength := int(length)
 
@@ -2015,7 +2046,7 @@ func (b *builtinRpadSig) evalString(row chunk.Row) (string, bool, error) {
 
 	padStr, isNull, err := b.args[2].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	padLength := len([]rune(padStr))
 
@@ -2036,7 +2067,7 @@ type bitLengthFunctionClass struct {
 
 func (c *bitLengthFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 10
@@ -2059,7 +2090,7 @@ func (b *builtinBitLengthSig) Clone() builtinFunc {
 func (b *builtinBitLengthSig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 
 	return int64(len(val) * 8), false, nil
@@ -2071,7 +2102,7 @@ type charFunctionClass struct {
 
 func (c *charFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	argTps := make([]types.EvalType, 0, len(args))
 	for i := 0; i < len(args)-1; i++ {
@@ -2117,7 +2148,7 @@ func (b *builtinCharSig) evalString(row chunk.Row) (string, bool, error) {
 	for i := 0; i < len(b.args)-1; i++ {
 		val, IsNull, err := b.args[i].EvalInt(b.ctx, row)
 		if err != nil {
-			return "", true, errors.Trace(err)
+			return "", true, err
 		}
 		if IsNull {
 			continue
@@ -2128,7 +2159,7 @@ func (b *builtinCharSig) evalString(row chunk.Row) (string, bool, error) {
 	// Use default charset utf8 if it is nil.
 	argCharset, IsNull, err := b.args[len(b.args)-1].EvalString(b.ctx, row)
 	if err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	result := string(b.convertToBytes(bigints))
@@ -2145,8 +2176,11 @@ func (b *builtinCharSig) evalString(row chunk.Row) (string, bool, error) {
 	oldStr := result
 	result, _, err = transform.String(encoding.NewDecoder(), result)
 	if err != nil {
-		log.Errorf("Convert %s to %s with error: %v", oldStr, charsetName, err.Error())
-		return "", true, errors.Trace(err)
+		logutil.Logger(context.Background()).Warn("change charset of string",
+			zap.String("string", oldStr),
+			zap.String("charset", charsetName),
+			zap.Error(err))
+		return "", true, err
 	}
 	return result, false, nil
 }
@@ -2157,7 +2191,7 @@ type charLengthFunctionClass struct {
 
 func (c *charLengthFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if argsErr := c.verifyArgs(args); argsErr != nil {
-		return nil, errors.Trace(argsErr)
+		return nil, argsErr
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	if types.IsBinaryStr(args[0].GetType()) {
@@ -2183,7 +2217,7 @@ func (b *builtinCharLengthBinarySig) Clone() builtinFunc {
 func (b *builtinCharLengthBinarySig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	return int64(len(val)), false, nil
 }
@@ -2203,7 +2237,7 @@ func (b *builtinCharLengthSig) Clone() builtinFunc {
 func (b *builtinCharLengthSig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	return int64(len([]rune(val))), false, nil
 }
@@ -2214,7 +2248,7 @@ type findInSetFunctionClass struct {
 
 func (c *findInSetFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString, types.ETString)
 	bf.tp.Flen = 3
@@ -2239,12 +2273,12 @@ func (b *builtinFindInSetSig) Clone() builtinFunc {
 func (b *builtinFindInSetSig) evalInt(row chunk.Row) (int64, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 
 	strlist, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 
 	if len(strlist) == 0 {
@@ -2265,7 +2299,7 @@ type fieldFunctionClass struct {
 
 func (c *fieldFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	isAllString, isAllNumber := true, true
@@ -2313,12 +2347,12 @@ func (b *builtinFieldIntSig) Clone() builtinFunc {
 func (b *builtinFieldIntSig) evalInt(row chunk.Row) (int64, bool, error) {
 	str, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return 0, err != nil, errors.Trace(err)
+		return 0, err != nil, err
 	}
 	for i, length := 1, len(b.args); i < length; i++ {
 		stri, isNull, err := b.args[i].EvalInt(b.ctx, row)
 		if err != nil {
-			return 0, true, errors.Trace(err)
+			return 0, true, err
 		}
 		if !isNull && str == stri {
 			return int64(i), false, nil
@@ -2342,12 +2376,12 @@ func (b *builtinFieldRealSig) Clone() builtinFunc {
 func (b *builtinFieldRealSig) evalInt(row chunk.Row) (int64, bool, error) {
 	str, isNull, err := b.args[0].EvalReal(b.ctx, row)
 	if isNull || err != nil {
-		return 0, err != nil, errors.Trace(err)
+		return 0, err != nil, err
 	}
 	for i, length := 1, len(b.args); i < length; i++ {
 		stri, isNull, err := b.args[i].EvalReal(b.ctx, row)
 		if err != nil {
-			return 0, true, errors.Trace(err)
+			return 0, true, err
 		}
 		if !isNull && str == stri {
 			return int64(i), false, nil
@@ -2371,12 +2405,12 @@ func (b *builtinFieldStringSig) Clone() builtinFunc {
 func (b *builtinFieldStringSig) evalInt(row chunk.Row) (int64, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, err != nil, errors.Trace(err)
+		return 0, err != nil, err
 	}
 	for i, length := 1, len(b.args); i < length; i++ {
 		stri, isNull, err := b.args[i].EvalString(b.ctx, row)
 		if err != nil {
-			return 0, true, errors.Trace(err)
+			return 0, true, err
 		}
 		if !isNull && str == stri {
 			return int64(i), false, nil
@@ -2414,7 +2448,7 @@ func (c *makeSetFunctionClass) getFlen(ctx sessionctx.Context, args []Expression
 
 func (c *makeSetFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	argTps := make([]types.EvalType, len(args))
 	argTps[0] = types.ETInt
@@ -2448,7 +2482,7 @@ func (b *builtinMakeSetSig) Clone() builtinFunc {
 func (b *builtinMakeSetSig) evalString(row chunk.Row) (string, bool, error) {
 	bits, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	sets := make([]string, 0, len(b.args)-1)
@@ -2458,7 +2492,7 @@ func (b *builtinMakeSetSig) evalString(row chunk.Row) (string, bool, error) {
 		}
 		str, isNull, err := b.args[i].EvalString(b.ctx, row)
 		if err != nil {
-			return "", true, errors.Trace(err)
+			return "", true, err
 		}
 		if !isNull {
 			sets = append(sets, str)
@@ -2474,7 +2508,7 @@ type octFunctionClass struct {
 
 func (c *octFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	var sig builtinFunc
 	if IsBinaryLiteral(args[0]) || args[0].GetType().EvalType() == types.ETInt {
@@ -2505,7 +2539,7 @@ func (b *builtinOctIntSig) Clone() builtinFunc {
 func (b *builtinOctIntSig) evalString(row chunk.Row) (string, bool, error) {
 	val, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 
 	return strconv.FormatUint(uint64(val), 8), false, nil
@@ -2526,7 +2560,7 @@ func (b *builtinOctStringSig) Clone() builtinFunc {
 func (b *builtinOctStringSig) evalString(row chunk.Row) (string, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 
 	negative, overflow := false, false
@@ -2542,7 +2576,7 @@ func (b *builtinOctStringSig) evalString(row chunk.Row) (string, bool, error) {
 	if err != nil {
 		numError, ok := err.(*strconv.NumError)
 		if !ok || numError.Err != strconv.ErrRange {
-			return "", true, errors.Trace(err)
+			return "", true, err
 		}
 		overflow = true
 	}
@@ -2558,7 +2592,7 @@ type ordFunctionClass struct {
 
 func (c *ordFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 10
@@ -2581,7 +2615,7 @@ func (b *builtinOrdSig) Clone() builtinFunc {
 func (b *builtinOrdSig) evalInt(row chunk.Row) (int64, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	if len(str) == 0 {
 		return 0, false, nil
@@ -2605,7 +2639,7 @@ type quoteFunctionClass struct {
 
 func (c *quoteFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	SetBinFlagOrBinStr(args[0].GetType(), bf.tp)
@@ -2632,7 +2666,7 @@ func (b *builtinQuoteSig) Clone() builtinFunc {
 func (b *builtinQuoteSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	runes := []rune(str)
@@ -2664,7 +2698,7 @@ type binFunctionClass struct {
 
 func (c *binFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETInt)
 	bf.tp.Flen = 64
@@ -2687,7 +2721,7 @@ func (b *builtinBinSig) Clone() builtinFunc {
 func (b *builtinBinSig) evalString(row chunk.Row) (string, bool, error) {
 	val, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	return fmt.Sprintf("%b", uint64(val)), false, nil
 }
@@ -2698,7 +2732,7 @@ type eltFunctionClass struct {
 
 func (c *eltFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if argsErr := c.verifyArgs(args); argsErr != nil {
-		return nil, errors.Trace(argsErr)
+		return nil, argsErr
 	}
 	argTps := make([]types.EvalType, 0, len(args))
 	argTps = append(argTps, types.ETInt)
@@ -2734,14 +2768,14 @@ func (b *builtinEltSig) Clone() builtinFunc {
 func (b *builtinEltSig) evalString(row chunk.Row) (string, bool, error) {
 	idx, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	if idx < 1 || idx >= int64(len(b.args)) {
 		return "", true, nil
 	}
 	arg, isNull, err := b.args[idx].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	return arg, false, nil
 }
@@ -2752,7 +2786,7 @@ type exportSetFunctionClass struct {
 
 func (c *exportSetFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (sig builtinFunc, err error) {
 	if err = c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	argTps := make([]types.EvalType, 0, 5)
 	argTps = append(argTps, types.ETInt, types.ETString, types.ETString)
@@ -2807,17 +2841,17 @@ func (b *builtinExportSet3ArgSig) Clone() builtinFunc {
 func (b *builtinExportSet3ArgSig) evalString(row chunk.Row) (string, bool, error) {
 	bits, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	on, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	off, isNull, err := b.args[2].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	return exportSet(bits, on, off, ",", 64), false, nil
@@ -2838,22 +2872,22 @@ func (b *builtinExportSet4ArgSig) Clone() builtinFunc {
 func (b *builtinExportSet4ArgSig) evalString(row chunk.Row) (string, bool, error) {
 	bits, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	on, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	off, isNull, err := b.args[2].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	separator, isNull, err := b.args[3].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	return exportSet(bits, on, off, separator, 64), false, nil
@@ -2874,27 +2908,27 @@ func (b *builtinExportSet5ArgSig) Clone() builtinFunc {
 func (b *builtinExportSet5ArgSig) evalString(row chunk.Row) (string, bool, error) {
 	bits, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	on, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	off, isNull, err := b.args[2].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	separator, isNull, err := b.args[3].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	numberOfBits, isNull, err := b.args[4].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	if numberOfBits < 0 || numberOfBits > 64 {
 		numberOfBits = 64
@@ -2909,10 +2943,16 @@ type formatFunctionClass struct {
 
 func (c *formatFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	argTps := make([]types.EvalType, 2, 3)
-	argTps[0], argTps[1] = types.ETString, types.ETString
+	argTps[1] = types.ETInt
+	argTp := args[0].GetType().EvalType()
+	if argTp == types.ETDecimal || argTp == types.ETInt {
+		argTps[0] = types.ETDecimal
+	} else {
+		argTps[0] = types.ETReal
+	}
 	if len(args) == 3 {
 		argTps = append(argTps, types.ETString)
 	}
@@ -2925,6 +2965,97 @@ func (c *formatFunctionClass) getFunction(ctx sessionctx.Context, args []Express
 		sig = &builtinFormatSig{bf}
 	}
 	return sig, nil
+}
+
+// formatMaxDecimals limits the maximum number of decimal digits for result of
+// function `format`, this value is same as `FORMAT_MAX_DECIMALS` in MySQL source code.
+const formatMaxDecimals int64 = 30
+
+// evalNumDecArgsForFormat evaluates first 2 arguments, i.e, x and d, for function `format`.
+func evalNumDecArgsForFormat(f builtinFunc, row chunk.Row) (string, string, bool, error) {
+	var xStr string
+	arg0, arg1 := f.getArgs()[0], f.getArgs()[1]
+	ctx := f.getCtx()
+	if arg0.GetType().EvalType() == types.ETDecimal {
+		x, isNull, err := arg0.EvalDecimal(ctx, row)
+		if isNull || err != nil {
+			return "", "", isNull, err
+		}
+		xStr = x.String()
+	} else {
+		x, isNull, err := arg0.EvalReal(ctx, row)
+		if isNull || err != nil {
+			return "", "", isNull, err
+		}
+		xStr = strconv.FormatFloat(x, 'f', -1, 64)
+	}
+	d, isNull, err := arg1.EvalInt(ctx, row)
+	if isNull || err != nil {
+		return "", "", isNull, err
+	}
+	if d < 0 {
+		d = 0
+	} else if d > formatMaxDecimals {
+		d = formatMaxDecimals
+	}
+	xStr = roundFormatArgs(xStr, int(d))
+	dStr := strconv.FormatInt(d, 10)
+	return xStr, dStr, false, nil
+}
+
+func roundFormatArgs(xStr string, maxNumDecimals int) string {
+	if !strings.Contains(xStr, ".") {
+		return xStr
+	}
+
+	sign := false
+	// xStr cannot have '+' prefix now.
+	// It is built in `evalNumDecArgsFormat` after evaluating `Evalxxx` method.
+	if strings.HasPrefix(xStr, "-") {
+		xStr = strings.Trim(xStr, "-")
+		sign = true
+	}
+
+	xArr := strings.Split(xStr, ".")
+	integerPart := xArr[0]
+	decimalPart := xArr[1]
+
+	if len(decimalPart) > maxNumDecimals {
+		t := []byte(decimalPart)
+		carry := false
+		if t[maxNumDecimals] >= '5' {
+			carry = true
+		}
+		for i := maxNumDecimals - 1; i >= 0 && carry; i-- {
+			if t[i] == '9' {
+				t[i] = '0'
+			} else {
+				t[i] = t[i] + 1
+				carry = false
+			}
+		}
+		decimalPart = string(t)
+		t = []byte(integerPart)
+		for i := len(integerPart) - 1; i >= 0 && carry; i-- {
+			if t[i] == '9' {
+				t[i] = '0'
+			} else {
+				t[i] = t[i] + 1
+				carry = false
+			}
+		}
+		if carry {
+			integerPart = "1" + string(t)
+		} else {
+			integerPart = string(t)
+		}
+	}
+
+	xStr = integerPart + "." + decimalPart
+	if sign {
+		xStr = "-" + xStr
+	}
+	return xStr
 }
 
 type builtinFormatWithLocaleSig struct {
@@ -2940,23 +3071,20 @@ func (b *builtinFormatWithLocaleSig) Clone() builtinFunc {
 // evalString evals FORMAT(X,D,locale).
 // See https://dev.mysql.com/doc/refman/5.7/en/string-functions.html#function_format
 func (b *builtinFormatWithLocaleSig) evalString(row chunk.Row) (string, bool, error) {
-	x, isNull, err := b.args[0].EvalString(b.ctx, row)
+	x, d, isNull, err := evalNumDecArgsForFormat(b, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", isNull, err
 	}
-
-	d, isNull, err := b.args[1].EvalString(b.ctx, row)
-	if isNull || err != nil {
-		return "", true, errors.Trace(err)
-	}
-
 	locale, isNull, err := b.args[2].EvalString(b.ctx, row)
-	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+	if err != nil {
+		return "", false, err
 	}
-
+	if isNull {
+		b.ctx.GetSessionVars().StmtCtx.AppendWarning(errUnknownLocale.GenWithStackByArgs("NULL"))
+		locale = "en_US"
+	}
 	formatString, err := mysql.GetLocaleFormatFunction(locale)(x, d)
-	return formatString, err != nil, errors.Trace(err)
+	return formatString, false, err
 }
 
 type builtinFormatSig struct {
@@ -2972,18 +3100,12 @@ func (b *builtinFormatSig) Clone() builtinFunc {
 // evalString evals FORMAT(X,D).
 // See https://dev.mysql.com/doc/refman/5.7/en/string-functions.html#function_format
 func (b *builtinFormatSig) evalString(row chunk.Row) (string, bool, error) {
-	x, isNull, err := b.args[0].EvalString(b.ctx, row)
+	x, d, isNull, err := evalNumDecArgsForFormat(b, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", isNull, err
 	}
-
-	d, isNull, err := b.args[1].EvalString(b.ctx, row)
-	if isNull || err != nil {
-		return "", true, errors.Trace(err)
-	}
-
 	formatString, err := mysql.GetLocaleFormatFunction("en_US")(x, d)
-	return formatString, err != nil, errors.Trace(err)
+	return formatString, false, err
 }
 
 type fromBase64FunctionClass struct {
@@ -2992,7 +3114,7 @@ type fromBase64FunctionClass struct {
 
 func (c *fromBase64FunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = mysql.MaxBlobWidth
@@ -3000,7 +3122,7 @@ func (c *fromBase64FunctionClass) getFunction(ctx sessionctx.Context, args []Exp
 	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
 	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	types.SetBinChsClnFlag(bf.tp)
@@ -3037,7 +3159,7 @@ func (b *builtinFromBase64Sig) Clone() builtinFunc {
 func (b *builtinFromBase64Sig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	needDecodeLen := base64NeededDecodedLength(len(str))
@@ -3065,7 +3187,7 @@ type toBase64FunctionClass struct {
 
 func (c *toBase64FunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = base64NeededEncodedLength(bf.args[0].GetType().Flen)
@@ -3073,7 +3195,7 @@ func (c *toBase64FunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
 	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	sig := &builtinToBase64Sig{bf, maxAllowedPacket}
@@ -3120,7 +3242,7 @@ func base64NeededEncodedLength(n int) int {
 func (b *builtinToBase64Sig) evalString(row chunk.Row) (d string, isNull bool, err error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 	needEncodeLen := base64NeededEncodedLength(len(str))
 	if needEncodeLen == -1 {
@@ -3164,7 +3286,7 @@ type insertFunctionClass struct {
 
 func (c *insertFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (sig builtinFunc, err error) {
 	if err = c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETInt, types.ETInt, types.ETString)
 	bf.tp.Flen = mysql.MaxBlobWidth
@@ -3174,7 +3296,7 @@ func (c *insertFunctionClass) getFunction(ctx sessionctx.Context, args []Express
 	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
 	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	if types.IsBinaryStr(args[0].GetType()) {
@@ -3202,13 +3324,13 @@ func (b *builtinInsertBinarySig) Clone() builtinFunc {
 func (b *builtinInsertBinarySig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	strLength := int64(len(str))
 
 	pos, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	if pos < 1 || pos > strLength {
 		return str, false, nil
@@ -3216,12 +3338,12 @@ func (b *builtinInsertBinarySig) evalString(row chunk.Row) (string, bool, error)
 
 	length, isNull, err := b.args[2].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	newstr, isNull, err := b.args[3].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	if length > strLength-pos+1 || length < 0 {
@@ -3253,14 +3375,14 @@ func (b *builtinInsertSig) Clone() builtinFunc {
 func (b *builtinInsertSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	runes := []rune(str)
 	runeLength := int64(len(runes))
 
 	pos, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	if pos < 1 || pos > runeLength {
 		return str, false, nil
@@ -3268,12 +3390,12 @@ func (b *builtinInsertSig) evalString(row chunk.Row) (string, bool, error) {
 
 	length, isNull, err := b.args[2].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	newstr, isNull, err := b.args[3].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	if length > runeLength-pos+1 || length < 0 {
@@ -3295,7 +3417,7 @@ type instrFunctionClass struct {
 
 func (c *instrFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString, types.ETString)
 	bf.tp.Flen = 11
@@ -3328,13 +3450,13 @@ func (b *builtinInstrBinarySig) Clone() builtinFunc {
 func (b *builtinInstrSig) evalInt(row chunk.Row) (int64, bool, error) {
 	str, IsNull, err := b.args[0].EvalString(b.ctx, row)
 	if IsNull || err != nil {
-		return 0, true, errors.Trace(err)
+		return 0, true, err
 	}
 	str = strings.ToLower(str)
 
 	substr, IsNull, err := b.args[1].EvalString(b.ctx, row)
 	if IsNull || err != nil {
-		return 0, true, errors.Trace(err)
+		return 0, true, err
 	}
 	substr = strings.ToLower(substr)
 
@@ -3350,12 +3472,12 @@ func (b *builtinInstrSig) evalInt(row chunk.Row) (int64, bool, error) {
 func (b *builtinInstrBinarySig) evalInt(row chunk.Row) (int64, bool, error) {
 	str, IsNull, err := b.args[0].EvalString(b.ctx, row)
 	if IsNull || err != nil {
-		return 0, true, errors.Trace(err)
+		return 0, true, err
 	}
 
 	substr, IsNull, err := b.args[1].EvalString(b.ctx, row)
 	if IsNull || err != nil {
-		return 0, true, errors.Trace(err)
+		return 0, true, err
 	}
 
 	idx := strings.Index(str, substr)

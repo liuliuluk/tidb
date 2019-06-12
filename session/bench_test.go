@@ -14,17 +14,21 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/ast"
+	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/mockstore"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
+	"github.com/pingcap/tidb/util/logutil"
+	"github.com/pingcap/tidb/util/sqlexec"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 var smallCount = 100
@@ -33,16 +37,16 @@ var bigCount = 10000
 func prepareBenchSession() (Session, *domain.Domain, kv.Storage) {
 	store, err := mockstore.NewMockTikvStore()
 	if err != nil {
-		log.Fatal(err)
+		logutil.Logger(context.Background()).Fatal(err.Error())
 	}
 	domain, err := BootstrapSession(store)
 	if err != nil {
-		log.Fatal(err)
+		logutil.Logger(context.Background()).Fatal(err.Error())
 	}
-	log.SetLevel(log.ErrorLevel)
+	log.SetLevel(zapcore.ErrorLevel)
 	se, err := CreateSession4Test(store)
 	if err != nil {
-		log.Fatal(err)
+		logutil.Logger(context.Background()).Fatal(err.Error())
 	}
 	mustExecute(se, "use test")
 	return se, domain, store
@@ -83,17 +87,17 @@ func prepareJoinBenchData(se Session, colType string, valueFormat string, valueC
 	mustExecute(se, "commit")
 }
 
-func readResult(ctx context.Context, rs ast.RecordSet, count int) {
-	chk := rs.NewChunk()
+func readResult(ctx context.Context, rs sqlexec.RecordSet, count int) {
+	req := rs.NewRecordBatch()
 	for count > 0 {
-		err := rs.Next(ctx, chk)
+		err := rs.Next(ctx, req)
 		if err != nil {
-			log.Fatal(err)
+			logutil.Logger(ctx).Fatal("read result failed", zap.Error(err))
 		}
-		if chk.NumRows() == 0 {
-			log.Fatal(count)
+		if req.NumRows() == 0 {
+			logutil.Logger(ctx).Fatal(strconv.Itoa(count))
 		}
-		count -= chk.NumRows()
+		count -= req.NumRows()
 	}
 	rs.Close()
 }

@@ -18,13 +18,13 @@
 package expression
 
 import (
-	"github.com/pingcap/tidb/ast"
-	"github.com/pingcap/tidb/mysql"
-	"github.com/pingcap/tidb/parser/opcode"
+	"github.com/pingcap/parser/ast"
+	"github.com/pingcap/parser/charset"
+	"github.com/pingcap/parser/mysql"
+	"github.com/pingcap/parser/opcode"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
-	"github.com/pingcap/tidb/util/charset"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tipb/go-tipb"
 )
@@ -141,15 +141,15 @@ func newBaseBuiltinFuncWithTp(ctx sessionctx.Context, args []Expression, retType
 			Tp:      mysql.TypeJSON,
 			Flen:    mysql.MaxBlobWidth,
 			Decimal: 0,
-			Charset: charset.CharsetUTF8,
-			Collate: charset.CollationUTF8,
+			Charset: mysql.DefaultCharset,
+			Collate: mysql.DefaultCollationName,
 			Flag:    mysql.BinaryFlag,
 		}
 	}
 	if mysql.HasBinaryFlag(fieldType.Flag) && fieldType.Tp != mysql.TypeJSON {
 		fieldType.Charset, fieldType.Collate = charset.CharsetBin, charset.CollationBin
 	} else {
-		fieldType.Charset, fieldType.Collate = charset.CharsetUTF8, charset.CharsetUTF8
+		fieldType.Charset, fieldType.Collate = charset.GetDefaultCharsetAndCollate()
 	}
 	return baseBuiltinFunc{
 		args: args,
@@ -199,7 +199,7 @@ func (b *baseBuiltinFunc) getRetTp() *types.FieldType {
 			b.tp.Tp = mysql.TypeMediumBlob
 		}
 		if len(b.tp.Charset) <= 0 {
-			b.tp.Charset, b.tp.Collate = charset.CharsetUTF8, charset.CollationUTF8
+			b.tp.Charset, b.tp.Collate = charset.GetDefaultCharsetAndCollate()
 		}
 	}
 	return b.tp
@@ -309,7 +309,9 @@ type functionClass interface {
 	getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error)
 }
 
-// funcs holds all registered builtin functions.
+// funcs holds all registered builtin functions. When new function is added,
+// check expression/function_traits.go to see if it should be appended to
+// any set there.
 var funcs = map[string]functionClass{
 	// common functions
 	ast.Coalesce: &coalesceFunctionClass{baseFunctionClass{ast.Coalesce, 1, -1}},
@@ -413,6 +415,7 @@ var funcs = map[string]functionClass{
 	ast.Year:             &yearFunctionClass{baseFunctionClass{ast.Year, 1, 1}},
 	ast.YearWeek:         &yearWeekFunctionClass{baseFunctionClass{ast.YearWeek, 1, 2}},
 	ast.LastDay:          &lastDayFunctionClass{baseFunctionClass{ast.LastDay, 1, 1}},
+	ast.TiDBParseTso:     &tidbParseTsoFunctionClass{baseFunctionClass{ast.TiDBParseTso, 1, 1}},
 
 	// string functions
 	ast.ASCII:           &asciiFunctionClass{baseFunctionClass{ast.ASCII, 1, 1}},
@@ -467,6 +470,7 @@ var funcs = map[string]functionClass{
 	// information functions
 	ast.ConnectionID: &connectionIDFunctionClass{baseFunctionClass{ast.ConnectionID, 0, 0}},
 	ast.CurrentUser:  &currentUserFunctionClass{baseFunctionClass{ast.CurrentUser, 0, 0}},
+	ast.CurrentRole:  &currentRoleFunctionClass{baseFunctionClass{ast.CurrentRole, 0, 0}},
 	ast.Database:     &databaseFunctionClass{baseFunctionClass{ast.Database, 0, 0}},
 	// This function is a synonym for DATABASE().
 	// See http://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_schema

@@ -14,6 +14,8 @@
 package tikv
 
 import (
+	"bytes"
+	"context"
 	"math"
 	"runtime"
 	"time"
@@ -22,7 +24,6 @@ import (
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/tikv/tikvrpc"
-	"golang.org/x/net/context"
 )
 
 type testLockSuite struct {
@@ -55,9 +56,13 @@ func (s *testLockSuite) lockKey(c *C, key, value, primaryKey, primaryValue []byt
 		err = txn.Delete(primaryKey)
 	}
 	c.Assert(err, IsNil)
-	tpc, err := newTwoPhaseCommitter(txn, 0)
+	tpc, err := newTwoPhaseCommitterWithInit(txn, 0)
 	c.Assert(err, IsNil)
-	tpc.keys = [][]byte{primaryKey, key}
+	if bytes.Equal(key, primaryKey) {
+		tpc.keys = [][]byte{primaryKey}
+	} else {
+		tpc.keys = [][]byte{primaryKey, key}
+	}
 
 	ctx := context.Background()
 	err = tpc.prewriteKeys(NewBackoffer(ctx, prewriteMaxBackoff), tpc.keys)
@@ -116,7 +121,7 @@ func (s *testLockSuite) TestScanLockResolveWithSeek(c *C) {
 
 	txn, err := s.store.Begin()
 	c.Assert(err, IsNil)
-	iter, err := txn.Seek([]byte("a"))
+	iter, err := txn.Iter([]byte("a"), nil)
 	c.Assert(err, IsNil)
 	for ch := byte('a'); ch <= byte('z'); ch++ {
 		c.Assert(iter.Valid(), IsTrue)
@@ -133,7 +138,7 @@ func (s *testLockSuite) TestScanLockResolveWithSeekKeyOnly(c *C) {
 	txn, err := s.store.Begin()
 	c.Assert(err, IsNil)
 	txn.SetOption(kv.KeyOnly, true)
-	iter, err := txn.Seek([]byte("a"))
+	iter, err := txn.Iter([]byte("a"), nil)
 	c.Assert(err, IsNil)
 	for ch := byte('a'); ch <= byte('z'); ch++ {
 		c.Assert(iter.Valid(), IsTrue)
@@ -198,7 +203,7 @@ func (s *testLockSuite) TestGetTxnStatus(c *C) {
 }
 
 func (s *testLockSuite) prewriteTxn(c *C, txn *tikvTxn) {
-	committer, err := newTwoPhaseCommitter(txn, 0)
+	committer, err := newTwoPhaseCommitterWithInit(txn, 0)
 	c.Assert(err, IsNil)
 	err = committer.prewriteKeys(NewBackoffer(context.Background(), prewriteMaxBackoff), committer.keys)
 	c.Assert(err, IsNil)

@@ -14,10 +14,10 @@
 package aggregation
 
 import (
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pkg/errors"
 )
 
 type firstRowFunction struct {
@@ -34,9 +34,9 @@ func (ff *firstRowFunction) Update(evalCtx *AggEvaluateContext, sc *stmtctx.Stat
 	}
 	value, err := ff.Args[0].Eval(row)
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
-	evalCtx.Value = types.CopyDatum(value)
+	evalCtx.Value = types.CloneDatum(value)
 	evalCtx.GotFirstRow = true
 	return nil
 }

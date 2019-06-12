@@ -14,10 +14,12 @@
 package types
 
 import (
+	"reflect"
+	"testing"
 	"time"
 
 	. "github.com/pingcap/check"
-	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types/json"
 )
@@ -38,9 +40,13 @@ func (ts *testDatumSuite) TestDatum(c *C) {
 	}
 	for _, val := range values {
 		var d Datum
+		d.SetMinNotNull()
 		d.SetValue(val)
 		x := d.GetValue()
 		c.Assert(x, DeepEquals, val)
+		d.SetCollation(d.Collation())
+		c.Assert(d.Collation(), NotNil)
+		c.Assert(d.Length(), Equals, int(d.length))
 	}
 }
 
@@ -72,7 +78,7 @@ func (ts *testDatumSuite) TestToBool(c *C) {
 	c.Assert(err, IsNil)
 	testDatumToBool(c, t, 1)
 
-	td, err := ParseDuration("11:11:11.999999", 6)
+	td, err := ParseDuration(nil, "11:11:11.999999", 6)
 	c.Assert(err, IsNil)
 	testDatumToBool(c, td, 1)
 
@@ -151,7 +157,7 @@ func (ts *testTypeConvertSuite) TestToInt64(c *C) {
 	c.Assert(err, IsNil)
 	testDatumToInt64(c, t, int64(20111110111112))
 
-	td, err := ParseDuration("11:11:11.999999", 6)
+	td, err := ParseDuration(nil, "11:11:11.999999", 6)
 	c.Assert(err, IsNil)
 	testDatumToInt64(c, td, int64(111112))
 
@@ -190,6 +196,34 @@ func (ts *testTypeConvertSuite) TestToFloat32(c *C) {
 	// Convert to float32 and convert back to float64, we will get a different value.
 	c.Assert(converted.GetFloat64(), Not(Equals), 281.37)
 	c.Assert(converted.GetFloat64(), Equals, datum.GetFloat64())
+}
+
+func (ts *testTypeConvertSuite) TestToFloat64(c *C) {
+	testCases := []struct {
+		d      Datum
+		errMsg string
+		result float64
+	}{
+		{NewDatum(float32(3.00)), "", 3.00},
+		{NewDatum(float64(12345.678)), "", 12345.678},
+		{NewDatum("12345.678"), "", 12345.678},
+		{NewDatum([]byte("12345.678")), "", 12345.678},
+		{NewDatum(int64(12345)), "", 12345},
+		{NewDatum(uint64(123456)), "", 123456},
+		{NewDatum(byte(123)), "cannot convert .*", 0},
+	}
+
+	sc := new(stmtctx.StatementContext)
+	sc.IgnoreTruncate = true
+	for _, t := range testCases {
+		converted, err := t.d.ToFloat64(sc)
+		if t.errMsg == "" {
+			c.Assert(err, IsNil)
+		} else {
+			c.Assert(err, ErrorMatches, t.errMsg)
+		}
+		c.Assert(converted, Equals, t.result)
+	}
 }
 
 // mustParseTimeIntoDatum is similar to ParseTime but panic if any error occurs.
@@ -262,27 +296,6 @@ func testIsNull(c *C, data interface{}, isnull bool) {
 	c.Assert(d.IsNull(), Equals, isnull, Commentf("data: %v, isnull: %v", data, isnull))
 }
 
-func (ts *testDatumSuite) TestCoerceDatum(c *C) {
-	tests := []struct {
-		a    Datum
-		b    Datum
-		kind byte
-	}{
-		{NewIntDatum(1), NewIntDatum(1), KindInt64},
-		{NewUintDatum(1), NewDecimalDatum(NewDecFromInt(1)), KindMysqlDecimal},
-		{NewFloat64Datum(1), NewDecimalDatum(NewDecFromInt(1)), KindFloat64},
-		{NewFloat64Datum(1), NewFloat64Datum(1), KindFloat64},
-	}
-	sc := new(stmtctx.StatementContext)
-	sc.IgnoreTruncate = true
-	for _, tt := range tests {
-		x, y, err := CoerceDatum(sc, tt.a, tt.b)
-		c.Check(err, IsNil)
-		c.Check(x.Kind(), Equals, y.Kind())
-		c.Check(x.Kind(), Equals, tt.kind)
-	}
-}
-
 func (ts *testDatumSuite) TestToBytes(c *C) {
 	tests := []struct {
 		a   Datum
@@ -303,7 +316,7 @@ func (ts *testDatumSuite) TestToBytes(c *C) {
 }
 
 func mustParseDurationDatum(str string, fsp int) Datum {
-	dur, err := ParseDuration(str, fsp)
+	dur, err := ParseDuration(nil, str, fsp)
 	if err != nil {
 		panic(err)
 	}
@@ -338,7 +351,7 @@ func (ts *testDatumSuite) TestComputePlusAndMinus(c *C) {
 	}
 }
 
-func (ts *testDatumSuite) TestCopyDatum(c *C) {
+func (ts *testDatumSuite) TestCloneDatum(c *C) {
 	var raw Datum
 	raw.b = []byte("raw")
 	raw.k = KindRaw
@@ -353,12 +366,48 @@ func (ts *testDatumSuite) TestCopyDatum(c *C) {
 	sc := new(stmtctx.StatementContext)
 	sc.IgnoreTruncate = true
 	for _, tt := range tests {
-		tt1 := CopyDatum(tt)
+		tt1 := CloneDatum(tt)
 		res, err := tt.CompareDatum(sc, &tt1)
 		c.Assert(err, IsNil)
 		c.Assert(res, Equals, 0)
 		if tt.b != nil {
 			c.Assert(&tt.b[0], Not(Equals), &tt1.b[0])
 		}
+	}
+}
+
+func prepareCompareDatums() ([]Datum, []Datum) {
+	vals := make([]Datum, 0, 5)
+	vals = append(vals, NewIntDatum(1))
+	vals = append(vals, NewFloat64Datum(1.23))
+	vals = append(vals, NewStringDatum("abcde"))
+	vals = append(vals, NewDecimalDatum(NewDecFromStringForTest("1.2345")))
+	vals = append(vals, NewTimeDatum(Time{Time: FromGoTime(time.Date(2018, 3, 8, 16, 1, 0, 315313000, time.UTC)), Fsp: 6, Type: mysql.TypeTimestamp}))
+
+	vals1 := make([]Datum, 0, 5)
+	vals1 = append(vals1, NewIntDatum(1))
+	vals1 = append(vals1, NewFloat64Datum(1.23))
+	vals1 = append(vals1, NewStringDatum("abcde"))
+	vals1 = append(vals1, NewDecimalDatum(NewDecFromStringForTest("1.2345")))
+	vals1 = append(vals1, NewTimeDatum(Time{Time: FromGoTime(time.Date(2018, 3, 8, 16, 1, 0, 315313000, time.UTC)), Fsp: 6, Type: mysql.TypeTimestamp}))
+	return vals, vals1
+}
+
+func BenchmarkCompareDatum(b *testing.B) {
+	vals, vals1 := prepareCompareDatums()
+	sc := new(stmtctx.StatementContext)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j, v := range vals {
+			v.CompareDatum(sc, &vals1[j])
+		}
+	}
+}
+
+func BenchmarkCompareDatumByReflect(b *testing.B) {
+	vals, vals1 := prepareCompareDatums()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reflect.DeepEqual(vals, vals1)
 	}
 }

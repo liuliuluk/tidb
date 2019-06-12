@@ -15,11 +15,12 @@
 package mock
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/pingcap/tidb/ast"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/owner"
 	"github.com/pingcap/tidb/sessionctx"
@@ -29,8 +30,6 @@ import (
 	"github.com/pingcap/tidb/util/kvcache"
 	"github.com/pingcap/tidb/util/sqlexec"
 	binlog "github.com/pingcap/tipb/go-binlog"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 var _ sessionctx.Context = (*Context)(nil)
@@ -39,8 +38,8 @@ var _ sqlexec.SQLExecutor = (*Context)(nil)
 // Context represents mocked sessionctx.Context.
 type Context struct {
 	values      map[fmt.Stringer]interface{}
-	txn         kv.Transaction // mock global variable
-	Store       kv.Storage     // mock global variable
+	txn         wrapTxn    // mock global variable
+	Store       kv.Storage // mock global variable
 	sessionVars *variable.SessionVars
 	mux         sync.Mutex // fix data race in ddl test.
 	ctx         context.Context
@@ -49,8 +48,16 @@ type Context struct {
 	pcache      *kvcache.SimpleLRUCache
 }
 
+type wrapTxn struct {
+	kv.Transaction
+}
+
+func (txn *wrapTxn) Valid() bool {
+	return txn.Transaction != nil && txn.Transaction.Valid()
+}
+
 // Execute implements sqlexec.SQLExecutor Execute interface.
-func (c *Context) Execute(ctx context.Context, sql string) ([]ast.RecordSet, error) {
+func (c *Context) Execute(ctx context.Context, sql string) ([]sqlexec.RecordSet, error) {
 	return nil, errors.Errorf("Not Support.")
 }
 
@@ -81,8 +88,8 @@ func (c *Context) GetSessionVars() *variable.SessionVars {
 }
 
 // Txn implements sessionctx.Context Txn interface.
-func (c *Context) Txn() kv.Transaction {
-	return c.txn
+func (c *Context) Txn(bool) (kv.Transaction, error) {
+	return &c.txn, nil
 }
 
 // GetClient implements sessionctx.Context GetClient interface.
@@ -118,11 +125,11 @@ func (c *Context) PreparedPlanCache() *kvcache.SimpleLRUCache {
 }
 
 // NewTxn implements the sessionctx.Context interface.
-func (c *Context) NewTxn() error {
+func (c *Context) NewTxn(context.Context) error {
 	if c.Store == nil {
 		return errors.New("store is not set")
 	}
-	if c.txn != nil && c.txn.Valid() {
+	if c.txn.Valid() {
 		err := c.txn.Commit(c.ctx)
 		if err != nil {
 			return errors.Trace(err)
@@ -133,33 +140,18 @@ func (c *Context) NewTxn() error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	c.txn = txn
+	c.txn.Transaction = txn
 	return nil
 }
 
 // RefreshTxnCtx implements the sessionctx.Context interface.
 func (c *Context) RefreshTxnCtx(ctx context.Context) error {
-	return errors.Trace(c.NewTxn())
-}
-
-// ActivePendingTxn implements the sessionctx.Context interface.
-func (c *Context) ActivePendingTxn() error {
-	if c.txn != nil {
-		return nil
-	}
-	if c.Store != nil {
-		txn, err := c.Store.Begin()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		c.txn = txn
-	}
-	return nil
+	return errors.Trace(c.NewTxn(ctx))
 }
 
 // InitTxnWithStartTS implements the sessionctx.Context interface with startTS.
 func (c *Context) InitTxnWithStartTS(startTS uint64) error {
-	if c.txn != nil {
+	if c.txn.Valid() {
 		return nil
 	}
 	if c.Store != nil {
@@ -172,7 +164,7 @@ func (c *Context) InitTxnWithStartTS(startTS uint64) error {
 			return errors.Trace(err)
 		}
 		txn.SetCap(membufCap)
-		c.txn = txn
+		c.txn.Transaction = txn
 	}
 	return nil
 }
@@ -206,7 +198,8 @@ func (c *Context) GoCtx() context.Context {
 func (c *Context) StoreQueryFeedback(_ interface{}) {}
 
 // StmtCommit implements the sessionctx.Context interface.
-func (c *Context) StmtCommit() {
+func (c *Context) StmtCommit() error {
+	return nil
 }
 
 // StmtRollback implements the sessionctx.Context interface.
@@ -231,7 +224,8 @@ func NewContext() *Context {
 		ctx:         ctx,
 		cancel:      cancel,
 	}
-	sctx.sessionVars.MaxChunkSize = 2
+	sctx.sessionVars.InitChunkSize = 2
+	sctx.sessionVars.MaxChunkSize = 32
 	sctx.sessionVars.StmtCtx.TimeZone = time.UTC
 	sctx.sessionVars.GlobalVarsAccessor = variable.NewMockGlobalAccessor()
 	return sctx

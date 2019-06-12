@@ -15,8 +15,8 @@ package expression
 
 import (
 	. "github.com/pingcap/check"
-	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/parser/model"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/testleak"
@@ -43,6 +43,7 @@ func (s *testEvaluatorSuite) TestColumn(c *C) {
 	c.Assert(corCol.Equal(nil, corCol), IsTrue)
 	c.Assert(corCol.Equal(nil, invalidCorCol), IsFalse)
 	c.Assert(corCol.IsCorrelated(), IsTrue)
+	c.Assert(corCol.ConstItem(), IsTrue)
 	c.Assert(corCol.Decorrelate(schema).Equal(nil, col), IsTrue)
 	c.Assert(invalidCorCol.Decorrelate(schema).Equal(nil, invalidCorCol), IsTrue)
 

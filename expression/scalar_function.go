@@ -17,18 +17,18 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/pingcap/tidb/ast"
-	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/parser/ast"
+	"github.com/pingcap/parser/model"
+	"github.com/pingcap/parser/mysql"
+	"github.com/pingcap/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
-	"github.com/pingcap/tidb/terror"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/hack"
-	"github.com/pkg/errors"
 )
 
 // ScalarFunction is the function that returns a value.
@@ -70,8 +70,8 @@ func (sf *ScalarFunction) MarshalJSON() ([]byte, error) {
 	return []byte(fmt.Sprintf("\"%s\"", sf)), nil
 }
 
-// NewFunction creates a new scalar function or constant.
-func NewFunction(ctx sessionctx.Context, funcName string, retType *types.FieldType, args ...Expression) (Expression, error) {
+// newFunctionImpl creates a new scalar function or constant.
+func newFunctionImpl(ctx sessionctx.Context, fold bool, funcName string, retType *types.FieldType, args ...Expression) (Expression, error) {
 	if retType == nil {
 		return nil, errors.Errorf("RetType cannot be nil for ScalarFunction.")
 	}
@@ -86,7 +86,7 @@ func NewFunction(ctx sessionctx.Context, funcName string, retType *types.FieldTy
 	copy(funcArgs, args)
 	f, err := fc.getFunction(ctx, funcArgs)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	if builtinRetTp := f.getRetTp(); builtinRetTp.Tp != mysql.TypeUnspecified || retType.Tp == mysql.TypeUnspecified {
 		retType = builtinRetTp
@@ -96,13 +96,26 @@ func NewFunction(ctx sessionctx.Context, funcName string, retType *types.FieldTy
 		RetType:  retType,
 		Function: f,
 	}
-	return FoldConstant(sf), nil
+	if fold {
+		return FoldConstant(sf), nil
+	}
+	return sf, nil
+}
+
+// NewFunction creates a new scalar function or constant via a constant folding.
+func NewFunction(ctx sessionctx.Context, funcName string, retType *types.FieldType, args ...Expression) (Expression, error) {
+	return newFunctionImpl(ctx, true, funcName, retType, args...)
+}
+
+// NewFunctionBase creates a new scalar function with no constant folding.
+func NewFunctionBase(ctx sessionctx.Context, funcName string, retType *types.FieldType, args ...Expression) (Expression, error) {
+	return newFunctionImpl(ctx, false, funcName, retType, args...)
 }
 
 // NewFunctionInternal is similar to NewFunction, but do not returns error, should only be used internally.
 func NewFunctionInternal(ctx sessionctx.Context, funcName string, retType *types.FieldType, args ...Expression) Expression {
 	expr, err := NewFunction(ctx, funcName, retType, args...)
-	terror.Log(errors.Trace(err))
+	terror.Log(err)
 	return expr
 }
 
@@ -152,6 +165,20 @@ func (sf *ScalarFunction) IsCorrelated() bool {
 	return false
 }
 
+// ConstItem implements Expression interface.
+func (sf *ScalarFunction) ConstItem() bool {
+	// Note: some unfoldable functions are deterministic, we use unFoldableFunctions here for simplification.
+	if _, ok := unFoldableFunctions[sf.FuncName.L]; ok {
+		return false
+	}
+	for _, arg := range sf.GetArgs() {
+		if !arg.ConstItem() {
+			return false
+		}
+	}
+	return true
+}
+
 // Decorrelate implements Expression interface.
 func (sf *ScalarFunction) Decorrelate(schema *Schema) Expression {
 	for i, arg := range sf.GetArgs() {
@@ -191,7 +218,7 @@ func (sf *ScalarFunction) Eval(row chunk.Row) (d types.Datum, err error) {
 
 	if isNull || err != nil {
 		d.SetValue(nil)
-		return d, errors.Trace(err)
+		return d, err
 	}
 	d.SetValue(res)
 	return
@@ -246,14 +273,18 @@ func (sf *ScalarFunction) HashCode(sc *stmtctx.StatementContext) []byte {
 }
 
 // ResolveIndices implements Expression interface.
-func (sf *ScalarFunction) ResolveIndices(schema *Schema) Expression {
+func (sf *ScalarFunction) ResolveIndices(schema *Schema) (Expression, error) {
 	newSf := sf.Clone()
-	newSf.resolveIndices(schema)
-	return newSf
+	err := newSf.resolveIndices(schema)
+	return newSf, err
 }
 
-func (sf *ScalarFunction) resolveIndices(schema *Schema) {
+func (sf *ScalarFunction) resolveIndices(schema *Schema) error {
 	for _, arg := range sf.GetArgs() {
-		arg.resolveIndices(schema)
+		err := arg.resolveIndices(schema)
+		if err != nil {
+			return err
+		}
 	}
+	return nil
 }

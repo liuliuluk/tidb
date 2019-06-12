@@ -16,9 +16,9 @@ package structure
 import (
 	"bytes"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pkg/errors"
 )
 
 // TypeFlag is for data structure meta/data flag.
@@ -61,6 +61,11 @@ func (t *TxStructure) encodeHashDataKey(key []byte, field []byte) kv.Key {
 	ek = codec.EncodeBytes(ek, key)
 	ek = codec.EncodeUint(ek, uint64(HashData))
 	return codec.EncodeBytes(ek, field)
+}
+
+// EncodeHashDataKey exports for tests.
+func (t *TxStructure) EncodeHashDataKey(key []byte, field []byte) kv.Key {
+	return t.encodeHashDataKey(key, field)
 }
 
 func (t *TxStructure) decodeHashDataKey(ek kv.Key) ([]byte, []byte, error) {

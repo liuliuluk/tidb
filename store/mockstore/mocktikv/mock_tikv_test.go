@@ -15,7 +15,6 @@ package mocktikv
 
 import (
 	"math"
-	"strings"
 	"testing"
 
 	. "github.com/pingcap/check"
@@ -119,7 +118,11 @@ func (s *testMockTiKVSuite) mustDeleteOK(c *C, key string, startTS, commitTS uin
 }
 
 func (s *testMockTiKVSuite) mustScanOK(c *C, start string, limit int, ts uint64, expect ...string) {
-	pairs := s.store.Scan([]byte(start), nil, limit, ts, kvrpcpb.IsolationLevel_SI)
+	s.mustRangeScanOK(c, start, "", limit, ts, expect...)
+}
+
+func (s *testMockTiKVSuite) mustRangeScanOK(c *C, start, end string, limit int, ts uint64, expect ...string) {
+	pairs := s.store.Scan([]byte(start), []byte(end), limit, ts, kvrpcpb.IsolationLevel_SI)
 	c.Assert(len(pairs)*2, Equals, len(expect))
 	for i := 0; i < len(pairs); i++ {
 		c.Assert(pairs[i].Err, IsNil)
@@ -129,7 +132,11 @@ func (s *testMockTiKVSuite) mustScanOK(c *C, start string, limit int, ts uint64,
 }
 
 func (s *testMockTiKVSuite) mustReverseScanOK(c *C, end string, limit int, ts uint64, expect ...string) {
-	pairs := s.store.ReverseScan(nil, []byte(end), limit, ts, kvrpcpb.IsolationLevel_SI)
+	s.mustRangeReverseScanOK(c, "", end, limit, ts, expect...)
+}
+
+func (s *testMockTiKVSuite) mustRangeReverseScanOK(c *C, start, end string, limit int, ts uint64, expect ...string) {
+	pairs := s.store.ReverseScan([]byte(start), []byte(end), limit, ts, kvrpcpb.IsolationLevel_SI)
 	c.Assert(len(pairs)*2, Equals, len(expect))
 	for i := 0; i < len(pairs); i++ {
 		c.Assert(pairs[i].Err, IsNil)
@@ -249,6 +256,9 @@ func (s *testMockTiKVSuite) TestReverseScan(c *C) {
 		s.mustReverseScanOK(c, "C\x00", 3, 10, "C", "C10", "A", "A10")
 		s.mustReverseScanOK(c, "C\x00", 4, 10, "C", "C10", "A", "A10")
 		s.mustReverseScanOK(c, "B", 1, 10, "A", "A10")
+		s.mustRangeReverseScanOK(c, "", "E", 5, 10, "C", "C10", "A", "A10")
+		s.mustRangeReverseScanOK(c, "", "C\x00", 5, 10, "C", "C10", "A", "A10")
+		s.mustRangeReverseScanOK(c, "A\x00", "C", 5, 10)
 	}
 	checkV10()
 
@@ -260,6 +270,9 @@ func (s *testMockTiKVSuite) TestReverseScan(c *C) {
 		s.mustReverseScanOK(c, "Z", 5, 20, "E", "E10", "D", "D20", "C", "C10", "B", "B20", "A", "A10")
 		s.mustReverseScanOK(c, "C\x00", 5, 20, "C", "C10", "B", "B20", "A", "A10")
 		s.mustReverseScanOK(c, "A\x00", 1, 20, "A", "A10")
+		s.mustRangeReverseScanOK(c, "B", "D", 5, 20, "C", "C10", "B", "B20")
+		s.mustRangeReverseScanOK(c, "B", "D\x00", 5, 20, "D", "D20", "C", "C10", "B", "B20")
+		s.mustRangeReverseScanOK(c, "B\x00", "D\x00", 5, 20, "D", "D20", "C", "C10")
 	}
 	checkV10()
 	checkV20()
@@ -308,6 +321,9 @@ func (s *testMockTiKVSuite) TestScan(c *C) {
 		s.mustScanOK(c, "A\x00", 3, 10, "C", "C10", "E", "E10")
 		s.mustScanOK(c, "C", 4, 10, "C", "C10", "E", "E10")
 		s.mustScanOK(c, "F", 1, 10)
+		s.mustRangeScanOK(c, "", "E", 5, 10, "A", "A10", "C", "C10")
+		s.mustRangeScanOK(c, "", "C\x00", 5, 10, "A", "A10", "C", "C10")
+		s.mustRangeScanOK(c, "A\x00", "C", 5, 10)
 	}
 	checkV10()
 
@@ -319,6 +335,9 @@ func (s *testMockTiKVSuite) TestScan(c *C) {
 		s.mustScanOK(c, "", 5, 20, "A", "A10", "B", "B20", "C", "C10", "D", "D20", "E", "E10")
 		s.mustScanOK(c, "C", 5, 20, "C", "C10", "D", "D20", "E", "E10")
 		s.mustScanOK(c, "D\x00", 1, 20, "E", "E10")
+		s.mustRangeScanOK(c, "B", "D", 5, 20, "B", "B20", "C", "C10")
+		s.mustRangeScanOK(c, "B", "D\x00", 5, 20, "B", "B20", "C", "C10", "D", "D20")
+		s.mustRangeScanOK(c, "B\x00", "D\x00", 5, 20, "C", "C10", "D", "D20")
 	}
 	checkV10()
 	checkV20()
@@ -492,7 +511,8 @@ func (s *testMockTiKVSuite) TestDeleteRange(c *C) {
 
 func (s *testMockTiKVSuite) mustWriteWriteConflict(c *C, errs []error, i int) {
 	c.Assert(errs[i], NotNil)
-	c.Assert(strings.Contains(errs[i].Error(), "write conflict"), IsTrue)
+	_, ok := errs[i].(*ErrConflict)
+	c.Assert(ok, IsTrue)
 }
 
 func (s *testMockTiKVSuite) TestRC(c *C) {

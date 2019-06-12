@@ -19,14 +19,15 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/pingcap/tidb/model"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"github.com/pingcap/parser/model"
 	stats "github.com/pingcap/tidb/statistics"
+	"github.com/pingcap/tidb/statistics/handle"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/mock"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
+	"go.uber.org/zap"
 )
 
 func loadStats(tblInfo *model.TableInfo, path string) (*stats.Table, error) {
@@ -34,13 +35,12 @@ func loadStats(tblInfo *model.TableInfo, path string) (*stats.Table, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	jsTable := &stats.JSONTable{}
+	jsTable := &handle.JSONTable{}
 	err = json.Unmarshal(data, jsTable)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	handle := stats.NewHandle(mock.NewContext(), 0)
-	return handle.LoadStatsFromJSONToTable(tblInfo, jsTable)
+	return handle.TableStatsFromJSON(tblInfo, tblInfo.ID, jsTable)
 }
 
 type histogram struct {
@@ -73,7 +73,7 @@ func (h *histogram) decodeInt(row *chunk.Row) int64 {
 	data := row.GetBytes(0)
 	_, result, err := codec.DecodeInt(data)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err.Error())
 	}
 	return result
 }
@@ -118,16 +118,16 @@ func (h *histogram) randDecimal() *types.MyDecimal {
 		rd := rand.Float64()
 		l, err := lower.ToFloat64()
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal(err.Error())
 		}
 		r, err := upper.ToFloat64()
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal(err.Error())
 		}
 		dec := &types.MyDecimal{}
 		err = dec.FromFloat64(l + rd*(r-l))
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal(err.Error())
 		}
 		return dec
 	}
@@ -137,7 +137,7 @@ func (h *histogram) randDecimal() *types.MyDecimal {
 func getValidPrefix(lower, upper string) string {
 	for i := range lower {
 		if i >= len(upper) {
-			log.Fatalf("lower %s is larger than upper %s", lower, upper)
+			log.Fatal("lower is larger than upper", zap.String("lower", lower), zap.String("upper", upper))
 		}
 		if lower[i] != upper[i] {
 			randCh := uint8(rand.Intn(int(upper[i]-lower[i]))) + lower[i]
@@ -191,21 +191,21 @@ func (h *histogram) randDate(unit string, mysqlFmt string, dateFmt string) strin
 		if diff == 0 {
 			str, err := lower.DateFormat(mysqlFmt)
 			if err != nil {
-				log.Fatal(err)
+				log.Fatal(err.Error())
 			}
 			return str
 		}
 		delta := randInt(0, int(diff)-1)
 		l, err := lower.Time.GoTime(time.Local)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal(err.Error())
 		}
 		l = l.AddDate(0, 0, delta)
 		return l.Format(dateFmt)
 	}
 	str, err := h.Bounds.GetRow(idx).GetTime(0).DateFormat(mysqlFmt)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err.Error())
 	}
 	return str
 }

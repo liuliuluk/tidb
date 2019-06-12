@@ -14,10 +14,10 @@
 package owner
 
 import (
+	"context"
 	"sync/atomic"
 
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
+	"github.com/pingcap/errors"
 )
 
 var _ Manager = &mockManager{}

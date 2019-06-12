@@ -21,14 +21,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pingcap/tidb/mysql"
+	"github.com/google/uuid"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
-	"github.com/pingcap/tidb/util/charset"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pkg/errors"
-	"github.com/twinj/uuid"
 )
 
 var (
@@ -74,6 +72,14 @@ var (
 	_ builtinFunc = &builtinIsIPv4MappedSig{}
 	_ builtinFunc = &builtinIsIPv6Sig{}
 	_ builtinFunc = &builtinUUIDSig{}
+
+	_ builtinFunc = &builtinNameConstIntSig{}
+	_ builtinFunc = &builtinNameConstRealSig{}
+	_ builtinFunc = &builtinNameConstDecimalSig{}
+	_ builtinFunc = &builtinNameConstTimeSig{}
+	_ builtinFunc = &builtinNameConstDurationSig{}
+	_ builtinFunc = &builtinNameConstStringSig{}
+	_ builtinFunc = &builtinNameConstJSONSig{}
 )
 
 type sleepFunctionClass struct {
@@ -82,7 +88,7 @@ type sleepFunctionClass struct {
 
 func (c *sleepFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETReal)
 	bf.tp.Flen = 21
@@ -105,7 +111,7 @@ func (b *builtinSleepSig) Clone() builtinFunc {
 func (b *builtinSleepSig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalReal(b.ctx, row)
 	if err != nil {
-		return 0, isNull, errors.Trace(err)
+		return 0, isNull, err
 	}
 	sessVars := b.ctx.GetSessionVars()
 	if isNull {
@@ -140,7 +146,7 @@ type lockFunctionClass struct {
 
 func (c *lockFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString, types.ETInt)
 	sig := &builtinLockSig{bf}
@@ -172,7 +178,7 @@ type releaseLockFunctionClass struct {
 
 func (c *releaseLockFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	sig := &builtinReleaseLockSig{bf}
@@ -204,7 +210,7 @@ type anyValueFunctionClass struct {
 
 func (c *anyValueFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	argTp := args[0].GetType().EvalType()
 	bf := newBaseBuiltinFuncWithTp(ctx, args, argTp, argTp)
@@ -227,10 +233,10 @@ func (c *anyValueFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		bf.tp.Decimal = types.UnspecifiedLength
 		sig = &builtinStringAnyValueSig{bf}
 	case types.ETDatetime, types.ETTimestamp:
-		bf.tp.Charset, bf.tp.Collate, bf.tp.Flag = charset.CharsetUTF8, charset.CollationUTF8, 0
+		bf.tp.Charset, bf.tp.Collate, bf.tp.Flag = mysql.DefaultCharset, mysql.DefaultCollationName, 0
 		sig = &builtinTimeAnyValueSig{bf}
 	default:
-		panic("unexpected types.EvalType of builtin function ANY_VALUE")
+		return nil, errIncorrectArgs.GenWithStackByArgs("ANY_VALUE")
 	}
 	return sig, nil
 }
@@ -361,7 +367,7 @@ type inetAtonFunctionClass struct {
 
 func (c *inetAtonFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 21
@@ -385,7 +391,7 @@ func (b *builtinInetAtonSig) Clone() builtinFunc {
 func (b *builtinInetAtonSig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if err != nil || isNull {
-		return 0, true, errors.Trace(err)
+		return 0, true, err
 	}
 	// ip address should not end with '.'.
 	if len(val) == 0 || val[len(val)-1] == '.' {
@@ -434,7 +440,7 @@ type inetNtoaFunctionClass struct {
 
 func (c *inetNtoaFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETInt)
 	bf.tp.Flen = 93
@@ -458,7 +464,7 @@ func (b *builtinInetNtoaSig) Clone() builtinFunc {
 func (b *builtinInetNtoaSig) evalString(row chunk.Row) (string, bool, error) {
 	val, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if err != nil || isNull {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	if val < 0 || uint64(val) > math.MaxUint32 {
@@ -482,7 +488,7 @@ type inet6AtonFunctionClass struct {
 
 func (c *inet6AtonFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = 16
@@ -507,7 +513,7 @@ func (b *builtinInet6AtonSig) Clone() builtinFunc {
 func (b *builtinInet6AtonSig) evalString(row chunk.Row) (string, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if err != nil || isNull {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	if len(val) == 0 {
@@ -551,7 +557,7 @@ type inet6NtoaFunctionClass struct {
 
 func (c *inet6NtoaFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = 117
@@ -575,7 +581,7 @@ func (b *builtinInet6NtoaSig) Clone() builtinFunc {
 func (b *builtinInet6NtoaSig) evalString(row chunk.Row) (string, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if err != nil || isNull {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	ip := net.IP([]byte(val)).String()
 	if len(val) == net.IPv6len && !strings.Contains(ip, ":") {
@@ -603,7 +609,7 @@ type isIPv4FunctionClass struct {
 
 func (c *isIPv4FunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 1
@@ -626,7 +632,7 @@ func (b *builtinIsIPv4Sig) Clone() builtinFunc {
 func (b *builtinIsIPv4Sig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if err != nil || isNull {
-		return 0, err != nil, errors.Trace(err)
+		return 0, err != nil, err
 	}
 	if isIPv4(val) {
 		return 1, false, nil
@@ -667,7 +673,7 @@ type isIPv4CompatFunctionClass struct {
 
 func (c *isIPv4CompatFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 1
@@ -690,7 +696,7 @@ func (b *builtinIsIPv4CompatSig) Clone() builtinFunc {
 func (b *builtinIsIPv4CompatSig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if err != nil || isNull {
-		return 0, err != nil, errors.Trace(err)
+		return 0, err != nil, err
 	}
 
 	ipAddress := []byte(val)
@@ -712,7 +718,7 @@ type isIPv4MappedFunctionClass struct {
 
 func (c *isIPv4MappedFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 1
@@ -735,7 +741,7 @@ func (b *builtinIsIPv4MappedSig) Clone() builtinFunc {
 func (b *builtinIsIPv4MappedSig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if err != nil || isNull {
-		return 0, err != nil, errors.Trace(err)
+		return 0, err != nil, err
 	}
 
 	ipAddress := []byte(val)
@@ -757,7 +763,7 @@ type isIPv6FunctionClass struct {
 
 func (c *isIPv6FunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 1
@@ -780,7 +786,7 @@ func (b *builtinIsIPv6Sig) Clone() builtinFunc {
 func (b *builtinIsIPv6Sig) evalInt(row chunk.Row) (int64, bool, error) {
 	val, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if err != nil || isNull {
-		return 0, err != nil, errors.Trace(err)
+		return 0, err != nil, err
 	}
 	ip := net.ParseIP(val)
 	if ip != nil && !isIPv4(val) {
@@ -810,7 +816,133 @@ type nameConstFunctionClass struct {
 }
 
 func (c *nameConstFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenWithStackByArgs("FUNCTION", "NAME_CONST")
+	if err := c.verifyArgs(args); err != nil {
+		return nil, err
+	}
+	argTp := args[1].GetType().EvalType()
+	bf := newBaseBuiltinFuncWithTp(ctx, args, argTp, types.ETString, argTp)
+	*bf.tp = *args[1].GetType()
+	var sig builtinFunc
+	switch argTp {
+	case types.ETDecimal:
+		sig = &builtinNameConstDecimalSig{bf}
+	case types.ETDuration:
+		sig = &builtinNameConstDurationSig{bf}
+	case types.ETInt:
+		bf.tp.Decimal = 0
+		sig = &builtinNameConstIntSig{bf}
+	case types.ETJson:
+		sig = &builtinNameConstJSONSig{bf}
+	case types.ETReal:
+		sig = &builtinNameConstRealSig{bf}
+	case types.ETString:
+		bf.tp.Decimal = types.UnspecifiedLength
+		sig = &builtinNameConstStringSig{bf}
+	case types.ETDatetime, types.ETTimestamp:
+		bf.tp.Charset, bf.tp.Collate, bf.tp.Flag = mysql.DefaultCharset, mysql.DefaultCollationName, 0
+		sig = &builtinNameConstTimeSig{bf}
+	default:
+		return nil, errIncorrectArgs.GenWithStackByArgs("NAME_CONST")
+	}
+	return sig, nil
+}
+
+type builtinNameConstDecimalSig struct {
+	baseBuiltinFunc
+}
+
+func (b *builtinNameConstDecimalSig) Clone() builtinFunc {
+	newSig := &builtinNameConstDecimalSig{}
+	newSig.cloneFrom(&b.baseBuiltinFunc)
+	return newSig
+}
+
+func (b *builtinNameConstDecimalSig) evalDecimal(row chunk.Row) (*types.MyDecimal, bool, error) {
+	return b.args[1].EvalDecimal(b.ctx, row)
+}
+
+type builtinNameConstIntSig struct {
+	baseBuiltinFunc
+}
+
+func (b *builtinNameConstIntSig) Clone() builtinFunc {
+	newSig := &builtinNameConstIntSig{}
+	newSig.cloneFrom(&b.baseBuiltinFunc)
+	return newSig
+}
+
+func (b *builtinNameConstIntSig) evalInt(row chunk.Row) (int64, bool, error) {
+	return b.args[1].EvalInt(b.ctx, row)
+}
+
+type builtinNameConstRealSig struct {
+	baseBuiltinFunc
+}
+
+func (b *builtinNameConstRealSig) Clone() builtinFunc {
+	newSig := &builtinNameConstRealSig{}
+	newSig.cloneFrom(&b.baseBuiltinFunc)
+	return newSig
+}
+
+func (b *builtinNameConstRealSig) evalReal(row chunk.Row) (float64, bool, error) {
+	return b.args[1].EvalReal(b.ctx, row)
+}
+
+type builtinNameConstStringSig struct {
+	baseBuiltinFunc
+}
+
+func (b *builtinNameConstStringSig) Clone() builtinFunc {
+	newSig := &builtinNameConstStringSig{}
+	newSig.cloneFrom(&b.baseBuiltinFunc)
+	return newSig
+}
+
+func (b *builtinNameConstStringSig) evalString(row chunk.Row) (string, bool, error) {
+	return b.args[1].EvalString(b.ctx, row)
+}
+
+type builtinNameConstJSONSig struct {
+	baseBuiltinFunc
+}
+
+func (b *builtinNameConstJSONSig) Clone() builtinFunc {
+	newSig := &builtinNameConstJSONSig{}
+	newSig.cloneFrom(&b.baseBuiltinFunc)
+	return newSig
+}
+
+func (b *builtinNameConstJSONSig) evalJSON(row chunk.Row) (json.BinaryJSON, bool, error) {
+	return b.args[1].EvalJSON(b.ctx, row)
+}
+
+type builtinNameConstDurationSig struct {
+	baseBuiltinFunc
+}
+
+func (b *builtinNameConstDurationSig) Clone() builtinFunc {
+	newSig := &builtinNameConstDurationSig{}
+	newSig.cloneFrom(&b.baseBuiltinFunc)
+	return newSig
+}
+
+func (b *builtinNameConstDurationSig) evalDuration(row chunk.Row) (types.Duration, bool, error) {
+	return b.args[1].EvalDuration(b.ctx, row)
+}
+
+type builtinNameConstTimeSig struct {
+	baseBuiltinFunc
+}
+
+func (b *builtinNameConstTimeSig) Clone() builtinFunc {
+	newSig := &builtinNameConstTimeSig{}
+	newSig.cloneFrom(&b.baseBuiltinFunc)
+	return newSig
+}
+
+func (b *builtinNameConstTimeSig) evalTime(row chunk.Row) (types.Time, bool, error) {
+	return b.args[1].EvalTime(b.ctx, row)
 }
 
 type releaseAllLocksFunctionClass struct {
@@ -827,7 +959,7 @@ type uuidFunctionClass struct {
 
 func (c *uuidFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString)
 	bf.tp.Flen = 36
@@ -848,7 +980,13 @@ func (b *builtinUUIDSig) Clone() builtinFunc {
 // evalString evals a builtinUUIDSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/miscellaneous-functions.html#function_uuid
 func (b *builtinUUIDSig) evalString(_ chunk.Row) (d string, isNull bool, err error) {
-	return uuid.NewV1().String(), false, nil
+	var id uuid.UUID
+	id, err = uuid.NewUUID()
+	if err != nil {
+		return
+	}
+	d = id.String()
+	return
 }
 
 type uuidShortFunctionClass struct {

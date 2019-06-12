@@ -18,10 +18,9 @@ import (
 	"testing"
 
 	"github.com/pingcap/check"
-	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
-	"github.com/pingcap/tidb/util/hack"
 )
 
 var _ = check.Suite(&testCodecSuite{})
@@ -74,7 +73,7 @@ func (s *testCodecSuite) TestCodec(c *check.C) {
 		c.Assert(row.GetString(2), check.Equals, str)
 		c.Assert(row.GetString(3), check.Equals, str)
 		c.Assert(row.GetMyDecimal(4).String(), check.Equals, str)
-		c.Assert(hack.String(row.GetJSON(5).GetString()), check.Equals, str)
+		c.Assert(string(row.GetJSON(5).GetString()), check.Equals, str)
 	}
 }
 

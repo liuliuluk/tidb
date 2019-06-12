@@ -14,10 +14,11 @@
 package tikv
 
 import (
+	"context"
+
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/mockstore/mocktikv"
-	"golang.org/x/net/context"
 )
 
 type testSplitSuite struct {
@@ -68,7 +69,7 @@ func (s *testSplitSuite) TestSplitBatchGet(c *C) {
 	}
 
 	s.split(c, loc.Region.id, []byte("b"))
-	s.store.regionCache.DropRegion(loc.Region)
+	s.store.regionCache.InvalidateCachedRegion(loc.Region)
 
 	// mocktikv will panic if it meets a not-in-region key.
 	err = snapshot.batchGetSingleRegion(s.bo, batch, func([]byte, []byte) {})

@@ -18,13 +18,13 @@ package kv
 import (
 	"sync/atomic"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/goleveldb/leveldb"
 	"github.com/pingcap/goleveldb/leveldb/comparer"
 	"github.com/pingcap/goleveldb/leveldb/iterator"
 	"github.com/pingcap/goleveldb/leveldb/memdb"
 	"github.com/pingcap/goleveldb/leveldb/util"
-	"github.com/pingcap/tidb/terror"
-	"github.com/pkg/errors"
+	"github.com/pingcap/parser/terror"
 )
 
 // memDbBuffer implements the MemBuffer interface.
@@ -50,17 +50,13 @@ func NewMemDbBuffer(cap int) MemBuffer {
 	}
 }
 
-// Seek creates an Iterator.
-func (m *memDbBuffer) Seek(k Key) (Iterator, error) {
-	var i Iterator
-	if k == nil {
-		i = &memDbIter{iter: m.db.NewIterator(&util.Range{}), reverse: false}
-	} else {
-		i = &memDbIter{iter: m.db.NewIterator(&util.Range{Start: []byte(k)}), reverse: false}
-	}
+// Iter creates an Iterator.
+func (m *memDbBuffer) Iter(k Key, upperBound Key) (Iterator, error) {
+	i := &memDbIter{iter: m.db.NewIterator(&util.Range{Start: []byte(k), Limit: []byte(upperBound)}), reverse: false}
+
 	err := i.Next()
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	return i, nil
 }
@@ -69,7 +65,7 @@ func (m *memDbBuffer) SetCap(cap int) {
 
 }
 
-func (m *memDbBuffer) SeekReverse(k Key) (Iterator, error) {
+func (m *memDbBuffer) IterReverse(k Key) (Iterator, error) {
 	var i *memDbIter
 	if k == nil {
 		i = &memDbIter{iter: m.db.NewIterator(&util.Range{}), reverse: true}
@@ -95,7 +91,7 @@ func (m *memDbBuffer) Set(k Key, v []byte) error {
 		return errors.Trace(ErrCannotSetNilValue)
 	}
 	if len(k)+len(v) > m.entrySizeLimit {
-		return ErrEntryTooLarge.GenWithStack("entry too large, size: %d", len(k)+len(v))
+		return ErrEntryTooLarge.GenWithStackByArgs(m.entrySizeLimit, len(k)+len(v))
 	}
 
 	err := m.db.Put(k, v)
@@ -161,7 +157,7 @@ func (i *memDbIter) Close() {
 
 // WalkMemBuffer iterates all buffered kv pairs in memBuf
 func WalkMemBuffer(memBuf MemBuffer, f func(k Key, v []byte) error) error {
-	iter, err := memBuf.Seek(nil)
+	iter, err := memBuf.Iter(nil, nil)
 	if err != nil {
 		return errors.Trace(err)
 	}

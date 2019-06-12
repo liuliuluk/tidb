@@ -16,6 +16,7 @@ package expression
 import (
 	"bytes"
 	"compress/zlib"
+	"crypto/aes"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha1"
@@ -25,14 +26,16 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"strings"
 
-	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/parser/auth"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/auth"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/encrypt"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -57,7 +60,9 @@ var (
 
 var (
 	_ builtinFunc = &builtinAesDecryptSig{}
+	_ builtinFunc = &builtinAesDecryptIVSig{}
 	_ builtinFunc = &builtinAesEncryptSig{}
+	_ builtinFunc = &builtinAesEncryptIVSig{}
 	_ builtinFunc = &builtinCompressSig{}
 	_ builtinFunc = &builtinMD5Sig{}
 	_ builtinFunc = &builtinPasswordSig{}
@@ -68,10 +73,33 @@ var (
 	_ builtinFunc = &builtinUncompressedLengthSig{}
 )
 
-// TODO: support other mode
-const (
-	aes128ecbBlobkSize = 16
-)
+// ivSize indicates the initialization vector supplied to aes_decrypt
+const ivSize = aes.BlockSize
+
+// aesModeAttr indicates that the key length and iv attribute for specific block_encryption_mode.
+// keySize is the key length in bits and mode is the encryption mode.
+// ivRequired indicates that initialization vector is required or not.
+type aesModeAttr struct {
+	modeName   string
+	keySize    int
+	ivRequired bool
+}
+
+var aesModes = map[string]*aesModeAttr{
+	//TODO support more modes, permitted mode values are: ECB, CBC, CFB1, CFB8, CFB128, OFB
+	"aes-128-ecb": {"ecb", 16, false},
+	"aes-192-ecb": {"ecb", 24, false},
+	"aes-256-ecb": {"ecb", 32, false},
+	"aes-128-cbc": {"cbc", 16, true},
+	"aes-192-cbc": {"cbc", 24, true},
+	"aes-256-cbc": {"cbc", 32, true},
+	"aes-128-ofb": {"ofb", 16, true},
+	"aes-192-ofb": {"ofb", 24, true},
+	"aes-256-ofb": {"ofb", 32, true},
+	"aes-128-cfb": {"cfb", 16, true},
+	"aes-192-cfb": {"cfb", 24, true},
+	"aes-256-cfb": {"cfb", 32, true},
+}
 
 type aesDecryptFunctionClass struct {
 	baseFunctionClass
@@ -79,22 +107,39 @@ type aesDecryptFunctionClass struct {
 
 func (c *aesDecryptFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(c.verifyArgs(args))
+		return nil, c.verifyArgs(args)
 	}
-	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETString)
+	argTps := make([]types.EvalType, 0, len(args))
+	for range args {
+		argTps = append(argTps, types.ETString)
+	}
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, argTps...)
 	bf.tp.Flen = args[0].GetType().Flen // At most.
 	types.SetBinChsClnFlag(bf.tp)
-	sig := &builtinAesDecryptSig{bf}
-	return sig, nil
+
+	blockMode, _ := ctx.GetSessionVars().GetSystemVar(variable.BlockEncryptionMode)
+	mode, exists := aesModes[strings.ToLower(blockMode)]
+	if !exists {
+		return nil, errors.Errorf("unsupported block encryption mode - %v", blockMode)
+	}
+	if mode.ivRequired {
+		if len(args) != 3 {
+			return nil, ErrIncorrectParameterCount.GenWithStackByArgs("aes_decrypt")
+		}
+		return &builtinAesDecryptIVSig{bf, mode}, nil
+	}
+	return &builtinAesDecryptSig{bf, mode}, nil
 }
 
 type builtinAesDecryptSig struct {
 	baseBuiltinFunc
+	*aesModeAttr
 }
 
 func (b *builtinAesDecryptSig) Clone() builtinFunc {
 	newSig := &builtinAesDecryptSig{}
 	newSig.cloneFrom(&b.baseBuiltinFunc)
+	newSig.aesModeAttr = b.aesModeAttr
 	return newSig
 }
 
@@ -104,17 +149,79 @@ func (b *builtinAesDecryptSig) evalString(row chunk.Row) (string, bool, error) {
 	// According to doc: If either function argument is NULL, the function returns NULL.
 	cryptStr, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
+	}
+	keyStr, isNull, err := b.args[1].EvalString(b.ctx, row)
+	if isNull || err != nil {
+		return "", true, err
+	}
+	if !b.ivRequired && len(b.args) == 3 {
+		// For modes that do not require init_vector, it is ignored and a warning is generated if it is specified.
+		b.ctx.GetSessionVars().StmtCtx.AppendWarning(errWarnOptionIgnored.GenWithStackByArgs("IV"))
+	}
+
+	key := encrypt.DeriveKeyMySQL([]byte(keyStr), b.keySize)
+	var plainText []byte
+	switch b.modeName {
+	case "ecb":
+		plainText, err = encrypt.AESDecryptWithECB([]byte(cryptStr), key)
+	default:
+		return "", true, errors.Errorf("unsupported block encryption mode - %v", b.modeName)
+	}
+	if err != nil {
+		return "", true, nil
+	}
+	return string(plainText), false, nil
+}
+
+type builtinAesDecryptIVSig struct {
+	baseBuiltinFunc
+	*aesModeAttr
+}
+
+func (b *builtinAesDecryptIVSig) Clone() builtinFunc {
+	newSig := &builtinAesDecryptIVSig{}
+	newSig.cloneFrom(&b.baseBuiltinFunc)
+	newSig.aesModeAttr = b.aesModeAttr
+	return newSig
+}
+
+// evalString evals AES_DECRYPT(crypt_str, key_key, iv).
+// See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_aes-decrypt
+func (b *builtinAesDecryptIVSig) evalString(row chunk.Row) (string, bool, error) {
+	// According to doc: If either function argument is NULL, the function returns NULL.
+	cryptStr, isNull, err := b.args[0].EvalString(b.ctx, row)
+	if isNull || err != nil {
+		return "", true, err
 	}
 
 	keyStr, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
-	// TODO: Support other modes.
-	key := encrypt.DeriveKeyMySQL([]byte(keyStr), aes128ecbBlobkSize)
-	plainText, err := encrypt.AESDecryptWithECB([]byte(cryptStr), key)
+	iv, isNull, err := b.args[2].EvalString(b.ctx, row)
+	if isNull || err != nil {
+		return "", true, err
+	}
+	if len(iv) < aes.BlockSize {
+		return "", true, errIncorrectArgs.GenWithStack("The initialization vector supplied to aes_decrypt is too short. Must be at least %d bytes long", aes.BlockSize)
+	}
+	// init_vector must be 16 bytes or longer (bytes in excess of 16 are ignored)
+	iv = iv[0:aes.BlockSize]
+
+	key := encrypt.DeriveKeyMySQL([]byte(keyStr), b.keySize)
+	var plainText []byte
+	switch b.modeName {
+	case "cbc":
+		plainText, err = encrypt.AESDecryptWithCBC([]byte(cryptStr), key, []byte(iv))
+	case "ofb":
+		plainText, err = encrypt.AESDecryptWithOFB([]byte(cryptStr), key, []byte(iv))
+	case "cfb":
+		plainText, err = encrypt.AESDecryptWithCFB([]byte(cryptStr), key, []byte(iv))
+	default:
+		return "", true, errors.Errorf("unsupported block encryption mode - %v", b.modeName)
+	}
 	if err != nil {
 		return "", true, nil
 	}
@@ -127,22 +234,39 @@ type aesEncryptFunctionClass struct {
 
 func (c *aesEncryptFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(c.verifyArgs(args))
+		return nil, c.verifyArgs(args)
 	}
-	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETString)
-	bf.tp.Flen = aes128ecbBlobkSize * (args[0].GetType().Flen/aes128ecbBlobkSize + 1) // At most.
+	argTps := make([]types.EvalType, 0, len(args))
+	for range args {
+		argTps = append(argTps, types.ETString)
+	}
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, argTps...)
+	bf.tp.Flen = aes.BlockSize * (args[0].GetType().Flen/aes.BlockSize + 1) // At most.
 	types.SetBinChsClnFlag(bf.tp)
-	sig := &builtinAesEncryptSig{bf}
-	return sig, nil
+
+	blockMode, _ := ctx.GetSessionVars().GetSystemVar(variable.BlockEncryptionMode)
+	mode, exists := aesModes[strings.ToLower(blockMode)]
+	if !exists {
+		return nil, errors.Errorf("unsupported block encryption mode - %v", blockMode)
+	}
+	if mode.ivRequired {
+		if len(args) != 3 {
+			return nil, ErrIncorrectParameterCount.GenWithStackByArgs("aes_encrypt")
+		}
+		return &builtinAesEncryptIVSig{bf, mode}, nil
+	}
+	return &builtinAesEncryptSig{bf, mode}, nil
 }
 
 type builtinAesEncryptSig struct {
 	baseBuiltinFunc
+	*aesModeAttr
 }
 
 func (b *builtinAesEncryptSig) Clone() builtinFunc {
 	newSig := &builtinAesEncryptSig{}
 	newSig.cloneFrom(&b.baseBuiltinFunc)
+	newSig.aesModeAttr = b.aesModeAttr
 	return newSig
 }
 
@@ -152,17 +276,79 @@ func (b *builtinAesEncryptSig) evalString(row chunk.Row) (string, bool, error) {
 	// According to doc: If either function argument is NULL, the function returns NULL.
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
+	}
+	keyStr, isNull, err := b.args[1].EvalString(b.ctx, row)
+	if isNull || err != nil {
+		return "", true, err
+	}
+	if !b.ivRequired && len(b.args) == 3 {
+		// For modes that do not require init_vector, it is ignored and a warning is generated if it is specified.
+		b.ctx.GetSessionVars().StmtCtx.AppendWarning(errWarnOptionIgnored.GenWithStackByArgs("IV"))
+	}
+
+	key := encrypt.DeriveKeyMySQL([]byte(keyStr), b.keySize)
+	var cipherText []byte
+	switch b.modeName {
+	case "ecb":
+		cipherText, err = encrypt.AESEncryptWithECB([]byte(str), key)
+	default:
+		return "", true, errors.Errorf("unsupported block encryption mode - %v", b.modeName)
+	}
+	if err != nil {
+		return "", true, nil
+	}
+	return string(cipherText), false, nil
+}
+
+type builtinAesEncryptIVSig struct {
+	baseBuiltinFunc
+	*aesModeAttr
+}
+
+func (b *builtinAesEncryptIVSig) Clone() builtinFunc {
+	newSig := &builtinAesEncryptIVSig{}
+	newSig.cloneFrom(&b.baseBuiltinFunc)
+	newSig.aesModeAttr = b.aesModeAttr
+	return newSig
+}
+
+// evalString evals AES_ENCRYPT(str, key_str, iv).
+// See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_aes-decrypt
+func (b *builtinAesEncryptIVSig) evalString(row chunk.Row) (string, bool, error) {
+	// According to doc: If either function argument is NULL, the function returns NULL.
+	str, isNull, err := b.args[0].EvalString(b.ctx, row)
+	if isNull || err != nil {
+		return "", true, err
 	}
 
 	keyStr, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
-	// TODO: Support other modes.
-	key := encrypt.DeriveKeyMySQL([]byte(keyStr), aes128ecbBlobkSize)
-	cipherText, err := encrypt.AESEncryptWithECB([]byte(str), key)
+	iv, isNull, err := b.args[2].EvalString(b.ctx, row)
+	if isNull || err != nil {
+		return "", true, err
+	}
+	if len(iv) < aes.BlockSize {
+		return "", true, errIncorrectArgs.GenWithStack("The initialization vector supplied to aes_encrypt is too short. Must be at least %d bytes long", aes.BlockSize)
+	}
+	// init_vector must be 16 bytes or longer (bytes in excess of 16 are ignored)
+	iv = iv[0:aes.BlockSize]
+
+	key := encrypt.DeriveKeyMySQL([]byte(keyStr), b.keySize)
+	var cipherText []byte
+	switch b.modeName {
+	case "cbc":
+		cipherText, err = encrypt.AESEncryptWithCBC([]byte(str), key, []byte(iv))
+	case "ofb":
+		cipherText, err = encrypt.AESEncryptWithOFB([]byte(str), key, []byte(iv))
+	case "cfb":
+		cipherText, err = encrypt.AESEncryptWithCFB([]byte(str), key, []byte(iv))
+	default:
+		return "", true, errors.Errorf("unsupported block encryption mode - %v", b.modeName)
+	}
 	if err != nil {
 		return "", true, nil
 	}
@@ -175,7 +361,7 @@ type decodeFunctionClass struct {
 
 func (c *decodeFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETString)
@@ -200,12 +386,12 @@ func (b *builtinDecodeSig) Clone() builtinFunc {
 func (b *builtinDecodeSig) evalString(row chunk.Row) (string, bool, error) {
 	dataStr, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	passwordStr, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	decodeStr, err := encrypt.SQLDecode(dataStr, passwordStr)
@@ -234,7 +420,7 @@ type encodeFunctionClass struct {
 
 func (c *encodeFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETString)
@@ -259,12 +445,12 @@ func (b *builtinEncodeSig) Clone() builtinFunc {
 func (b *builtinEncodeSig) evalString(row chunk.Row) (string, bool, error) {
 	decodeStr, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	passwordStr, isNull, err := b.args[1].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	dataStr, err := encrypt.SQLEncode(decodeStr, passwordStr)
@@ -293,7 +479,7 @@ type passwordFunctionClass struct {
 
 func (c *passwordFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = mysql.PWDHashLen + 1
@@ -316,7 +502,7 @@ func (b *builtinPasswordSig) Clone() builtinFunc {
 func (b *builtinPasswordSig) evalString(row chunk.Row) (d string, isNull bool, err error) {
 	pass, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", err != nil, errors.Trace(err)
+		return "", err != nil, err
 	}
 
 	if len(pass) == 0 {
@@ -336,7 +522,7 @@ type randomBytesFunctionClass struct {
 
 func (c *randomBytesFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETInt)
 	bf.tp.Flen = 1024 // Max allowed random bytes
@@ -360,14 +546,14 @@ func (b *builtinRandomBytesSig) Clone() builtinFunc {
 func (b *builtinRandomBytesSig) evalString(row chunk.Row) (string, bool, error) {
 	len, isNull, err := b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	if len < 1 || len > 1024 {
 		return "", false, types.ErrOverflow.GenWithStackByArgs("length", "random_bytes")
 	}
 	buf := make([]byte, len)
 	if n, err := rand.Read(buf); err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	} else if int64(n) != len {
 		return "", false, errors.New("fail to generate random bytes")
 	}
@@ -380,7 +566,7 @@ type md5FunctionClass struct {
 
 func (c *md5FunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = 32
@@ -403,7 +589,7 @@ func (b *builtinMD5Sig) Clone() builtinFunc {
 func (b *builtinMD5Sig) evalString(row chunk.Row) (string, bool, error) {
 	arg, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 	sum := md5.Sum([]byte(arg))
 	hexStr := fmt.Sprintf("%x", sum)
@@ -416,7 +602,7 @@ type sha1FunctionClass struct {
 
 func (c *sha1FunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = 40
@@ -440,12 +626,12 @@ func (b *builtinSHA1Sig) Clone() builtinFunc {
 func (b *builtinSHA1Sig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 	hasher := sha1.New()
 	_, err = hasher.Write([]byte(str))
 	if err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	return fmt.Sprintf("%x", hasher.Sum(nil)), false, nil
 }
@@ -456,7 +642,7 @@ type sha2FunctionClass struct {
 
 func (c *sha2FunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETInt)
 	bf.tp.Flen = 128 // sha512
@@ -488,11 +674,11 @@ const (
 func (b *builtinSHA2Sig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 	hashLength, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
-		return "", isNull, errors.Trace(err)
+		return "", isNull, err
 	}
 	var hasher hash.Hash
 	switch int(hashLength) {
@@ -511,7 +697,7 @@ func (b *builtinSHA2Sig) evalString(row chunk.Row) (string, bool, error) {
 
 	_, err = hasher.Write([]byte(str))
 	if err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	return fmt.Sprintf("%x", hasher.Sum(nil)), false, nil
 }
@@ -521,10 +707,10 @@ func deflate(data []byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	w := zlib.NewWriter(&buffer)
 	if _, err := w.Write(data); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	if err := w.Close(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	return buffer.Bytes(), nil
 }
@@ -535,13 +721,13 @@ func inflate(compressStr []byte) ([]byte, error) {
 	var out bytes.Buffer
 	r, err := zlib.NewReader(reader)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	if _, err = io.Copy(&out, r); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	err = r.Close()
-	return out.Bytes(), errors.Trace(err)
+	return out.Bytes(), err
 }
 
 type compressFunctionClass struct {
@@ -550,7 +736,7 @@ type compressFunctionClass struct {
 
 func (c *compressFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	srcLen := args[0].GetType().Flen
@@ -579,7 +765,7 @@ func (b *builtinCompressSig) Clone() builtinFunc {
 func (b *builtinCompressSig) evalString(row chunk.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 
 	// According to doc: Empty strings are stored as empty strings.
@@ -617,7 +803,7 @@ type uncompressFunctionClass struct {
 
 func (c *uncompressFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = mysql.MaxBlobWidth
@@ -642,7 +828,7 @@ func (b *builtinUncompressSig) evalString(row chunk.Row) (string, bool, error) {
 	sc := b.ctx.GetSessionVars().StmtCtx
 	payload, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", true, err
 	}
 	if len(payload) == 0 {
 		return "", false, nil
@@ -652,9 +838,14 @@ func (b *builtinUncompressSig) evalString(row chunk.Row) (string, bool, error) {
 		sc.AppendWarning(errZlibZData)
 		return "", true, nil
 	}
+	length := binary.LittleEndian.Uint32([]byte(payload[0:4]))
 	bytes, err := inflate([]byte(payload[4:]))
 	if err != nil {
 		sc.AppendWarning(errZlibZData)
+		return "", true, nil
+	}
+	if length < uint32(len(bytes)) {
+		sc.AppendWarning(errZlibZBuf)
 		return "", true, nil
 	}
 	return string(bytes), false, nil
@@ -666,7 +857,7 @@ type uncompressedLengthFunctionClass struct {
 
 func (c *uncompressedLengthFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 10
@@ -690,7 +881,7 @@ func (b *builtinUncompressedLengthSig) evalInt(row chunk.Row) (int64, bool, erro
 	sc := b.ctx.GetSessionVars().StmtCtx
 	payload, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
-		return 0, true, errors.Trace(err)
+		return 0, true, err
 	}
 	if len(payload) == 0 {
 		return 0, false, nil

@@ -17,12 +17,12 @@ import (
 	"math"
 
 	. "github.com/pingcap/check"
-	"github.com/pingcap/tidb/ast"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/testleak"
 	"github.com/pingcap/tidb/util/testutil"
-	"github.com/pkg/errors"
 )
 
 func (s *testEvaluatorSuite) TestUnary(c *C) {
@@ -49,7 +49,7 @@ func (s *testEvaluatorSuite) TestUnary(c *C) {
 		f, err := newFunctionForTest(s.ctx, ast.UnaryMinus, s.primitiveValsToConstants([]interface{}{t.args})...)
 		c.Assert(err, IsNil)
 		d, err := f.Eval(chunk.Row{})
-		if t.getErr == false {
+		if !t.getErr {
 			c.Assert(err, IsNil)
 			if !t.overflow {
 				c.Assert(d.GetValue(), Equals, t.expected)
